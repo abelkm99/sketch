@@ -37,6 +37,9 @@ pub fn override_key(field: &str) -> &'static str {
 fn copy_props(main: &Node, inst: &mut Node, overrides: &[String], is_root: bool) {
     let ov = |k: &str| overrides.iter().any(|o| o == k);
     let s = &main.style;
+    if !ov("variables") {
+        inst.style.variables = s.variables.clone();
+    }
     if !ov("fills") {
         inst.style.fills = s.fills.clone();
     }

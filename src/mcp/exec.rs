@@ -20,7 +20,7 @@ use crate::project::{Project, Store};
 use crate::render::gpu::Headless;
 use crate::session::Session;
 use serde_json::{Map, Value, json};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -1260,6 +1260,7 @@ struct Parent {
     definite: [bool; 2],
     /// Children without an explicit cross size stretch (CSS `align-items: normal`).
     stretch: bool,
+    variables: BTreeMap<String, String>,
 }
 
 impl Parent {
@@ -1271,6 +1272,7 @@ impl Parent {
                 size: None,
                 definite: [false; 2],
                 stretch: false,
+                variables: BTreeMap::new(),
             },
             Some(n) => Parent {
                 id: Some(n.id),
@@ -1281,6 +1283,7 @@ impl Parent {
                     n.layout_child.sizing[1] != Sizing::Hug,
                 ],
                 stretch: stretches(page_id, n),
+                variables: n.style.variables.clone(),
             },
         }
     }
@@ -1408,7 +1411,7 @@ fn inherit(parent: &Styles, own: &Styles) -> Styles {
         .unwrap_or(16.0);
     let mut out: Styles = parent.clone();
     for (k, v) in own {
-        if INHERITED.contains(&k.as_str()) {
+        if INHERITED.contains(&k.as_str()) || k.starts_with("--") {
             let v = if k == "fontSize" {
                 css::length(v, pfs).map_or(v.clone(), |px| format!("{px}px"))
             } else {
@@ -1744,6 +1747,7 @@ impl Builder<'_, '_> {
         );
         n.id = self.tx.alloc_id();
         n.style.set_fill(Some(Color::BLACK));
+        n.style.variables = parent.variables.clone();
         n.name = Self::layer_name(el).unwrap_or_else(|| {
             content
                 .lines()
@@ -1782,6 +1786,7 @@ impl Builder<'_, '_> {
         );
         n.id = self.tx.alloc_id();
         n.style.fills.clear();
+        n.style.variables = parent.variables.clone();
         n.name = Self::layer_name(el).unwrap_or_else(|| match el.tag.as_str() {
             "div" | "span" => "Frame".into(),
             t => {
@@ -1869,6 +1874,7 @@ impl Builder<'_, '_> {
         n.name = Self::layer_name(el)
             .or_else(|| el.attr("alt").map(String::from))
             .unwrap_or_else(|| "Image".into());
+        n.style.variables = parent.variables.clone();
         n.style.fills = match &asset {
             Some(a) => vec![Paint::Image {
                 asset: a.clone(),

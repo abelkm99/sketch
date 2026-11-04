@@ -5,6 +5,7 @@ use super::paint::{
 };
 use crate::geom::{Rect, V2};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::BTreeMap;
 use std::fmt;
 
 #[derive(
@@ -96,6 +97,9 @@ fn no_border_sides(sides: &[Option<SideBorder>; 4]) -> bool {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Style {
+    /// Inherited CSS custom properties, retained for later MCP style updates.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub variables: BTreeMap<String, String>,
     /// Fill layers, bottom to top.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub fills: Vec<Paint>,
@@ -133,6 +137,7 @@ fn is_default<T: Default + PartialEq>(t: &T) -> bool {
 impl Default for Style {
     fn default() -> Self {
         Style {
+            variables: BTreeMap::new(),
             fills: Vec::new(),
             stroke: None,
             stroke_width: 1.0,

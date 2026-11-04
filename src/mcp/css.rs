@@ -13,12 +13,16 @@ use crate::model::{
     TextAlign,
 };
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 
 /// An ordered list of `(camelCaseProperty, value)` pairs.
 pub type Styles = Vec<(String, String)>;
 
 /// `background-color` → `backgroundColor`; camelCase passes through.
 pub fn camel(prop: &str) -> String {
+    if prop.trim().starts_with("--") {
+        return prop.trim().to_string();
+    }
     let mut out = String::new();
     let mut up = false;
     for c in prop.trim().chars() {
@@ -608,14 +612,73 @@ fn rough_mut(n: &mut Node) -> &mut Rough {
     })
 }
 
+/// Resolve CSS var() references (including nested fallbacks); cycles/unknowns without a
+/// fallback stay unresolved so the caller can report the unsupported value.
+fn resolve_vars(value: &str, vars: &BTreeMap<String, String>, depth: usize) -> Option<String> {
+    if depth > 16 {
+        return None;
+    }
+    let Some(start) = value.find("var(") else {
+        return Some(value.to_string());
+    };
+    let from = start + 4;
+    let mut level = 0usize;
+    let end = value[from..].char_indices().find_map(|(i, c)| match c {
+        '(' => {
+            level += 1;
+            None
+        }
+        ')' if level == 0 => Some(from + i),
+        ')' => {
+            level -= 1;
+            None
+        }
+        _ => None,
+    })?;
+    let args = &value[from..end];
+    let mut comma = None;
+    let mut nested = 0usize;
+    for (i, c) in args.char_indices() {
+        match c {
+            '(' => nested += 1,
+            ')' => nested = nested.saturating_sub(1),
+            ',' if nested == 0 => {
+                comma = Some(i);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let (key, fallback) = comma.map_or((args.trim(), None), |i| {
+        (args[..i].trim(), Some(args[i + 1..].trim()))
+    });
+    if !key.starts_with("--") {
+        return None;
+    }
+    let replacement = vars
+        .get(key)
+        .and_then(|v| resolve_vars(v, vars, depth + 1))
+        .or_else(|| fallback.and_then(|v| resolve_vars(v, vars, depth + 1)))?;
+    let assembled = format!("{}{}{}", &value[..start], replacement, &value[end + 1..]);
+    resolve_vars(&assembled, vars, depth + 1)
+}
+
 /// Apply styles to a node. Layout-dependent properties use `ctx`; text properties apply to
 /// text and sticky nodes; box properties to everything else.
 pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applied {
     let mut a = Applied::default();
+    for (k, v) in styles {
+        if k.starts_with("--") {
+            n.style.variables.insert(k.clone(), v.clone());
+        }
+    }
     // Font size first: `em` values elsewhere depend on it.
     if let Some((_, v)) = styles.iter().rev().find(|(k, _)| k == "fontSize") {
         let cur = n.kind.font_size().unwrap_or(16.0);
-        if let Some(px) = length(v, cur).filter(|p| *p > 0.0) {
+        if let Some(px) = resolve_vars(v, &n.style.variables, 0)
+            .and_then(|v| length(&v, cur))
+            .filter(|p| *p > 0.0)
+        {
             match &mut n.kind {
                 NodeKind::Text { font_size, .. } | NodeKind::Sticky { font_size, .. } => {
                     *font_size = px
@@ -627,9 +690,11 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
     let is_text = n.kind.text().is_some();
     let fs = n.kind.font_size().unwrap_or(16.0);
     for (k, v) in styles {
-        let v = v.trim();
+        let resolved = resolve_vars(v, &n.style.variables, 0).unwrap_or_else(|| v.clone());
+        let v = resolved.trim();
         let lower = v.to_ascii_lowercase();
         let ok = match k.as_str() {
+            key if key.starts_with("--") => true,
             "fontSize" => true, // applied above; inherited by text children
             "width" => {
                 set_size(n, 0, v, ctx, &mut a, k);
@@ -1292,6 +1357,9 @@ pub fn computed(n: &Node, parent_layout: Option<&AutoLayout>, is_root: bool) -> 
         Sizing::Fill if parent_layout.is_some() => "100%".to_string(),
         _ => px(v),
     };
+    for (key, value) in &n.style.variables {
+        put(key, value.clone());
+    }
     if let NodeKind::Text { auto_width, .. } = &n.kind {
         if n.text_style.no_wrap {
             put("whiteSpace", "nowrap".into());

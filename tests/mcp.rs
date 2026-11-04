@@ -349,6 +349,43 @@ fn editing_tools_update_move_duplicate_and_delete() {
 }
 
 #[test]
+fn css_custom_properties_inherit_and_var_fallbacks_resolve() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Tokens", "styles": {"width": 250, "height": 200}}),
+    );
+    let created = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+        "html": "<div style='--accent:#ff0000;display:flex;flex-direction:column'><div layer-name='Inherited' style='width:40px;height:30px;background-color:var(--accent)'></div><div layer-name='Fallback' style='width:40px;height:30px;background-color:var(--missing, #3e8c7a)'></div></div>"}),
+    );
+    let root = &created["createdNodeIds"][0];
+    let children = h.ed.doc.get(num(root)).unwrap().children.clone();
+    assert_eq!(
+        h.ed.doc.get(children[0]).unwrap().style.fill(),
+        Some(Color::rgb(255, 0, 0))
+    );
+    assert_eq!(
+        h.ed.doc.get(children[1]).unwrap().style.fill(),
+        Some(Color::rgb(0x3e, 0x8c, 0x7a))
+    );
+    assert!(created.get("ignoredStyles").is_none(), "{created}");
+    let id = exec::node_key(&h.ed, 0, children[1]);
+    call(
+        &mut h,
+        "update_styles",
+        json!({"updates": [{"nodeIds": [id], "styles": {"--accent": "#0000ff", "backgroundColor": "var(--accent)"}}]}),
+    );
+    assert_eq!(
+        h.ed.doc.get(children[1]).unwrap().style.fill(),
+        Some(Color::rgb(0, 0, 255))
+    );
+}
+
+#[test]
 fn nowrap_text_with_ellipsis_stays_inside_its_box() {
     let mut h = host();
     let artboard = call(
