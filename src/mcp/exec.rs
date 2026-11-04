@@ -2470,6 +2470,7 @@ fn batch<T: Clone>(
     key: &str,
     label: &str,
     parse: impl Fn(&Args) -> Result<T, String>,
+    validate: impl Fn(&Node) -> Result<(), String>,
     mut f: impl FnMut(&mut Tx, NodeId, &T) -> Result<(), String>,
 ) -> Result<usize, String> {
     let def = page_arg(ed, a)?;
@@ -2478,6 +2479,10 @@ fn batch<T: Clone>(
         let u = Args(u.as_object().ok_or("each update must be an object")?);
         let (page, id) = resolve(ed, u.req_str("nodeId")?, def)?;
         let v = parse(&u)?;
+        // Validate every entry before starting any page's edit. Tx is not rolled back
+        // when an edit closure returns Err, so a mid-batch failure would half-apply.
+        validate(ed.page_doc(page).get(id).unwrap())
+            .map_err(|e| format!("{}: {e}", node_key(ed, page, id)))?;
         match by_page.iter_mut().find(|(p, _)| *p == page) {
             Some((_, list)) => list.push((id, v)),
             None => by_page.push((page, vec![(id, v)])),
@@ -2510,15 +2515,18 @@ fn set_text_content(ed: &mut Editor, a: &Args) -> ToolResult {
                 .unwrap_or("")
                 .to_string())
         },
-        |tx, id, t| {
-            let node = tx.node_mut(id).unwrap();
-            let old_len = node.kind.text().map(|s| s.chars().count()).ok_or_else(|| {
+        |node| {
+            node.kind.text().map(|_| ()).ok_or_else(|| {
                 format!(
                     "{} is a {}, not a text layer",
                     node.name,
                     node.kind.type_name()
                 )
-            })?;
+            })
+        },
+        |tx, id, t| {
+            let node = tx.node_mut(id).unwrap();
+            let old_len = node.kind.text().unwrap().chars().count();
             *node.kind.text_mut().unwrap() = t.clone();
             let len = t.chars().count();
             for s in &mut node.text_style.spans {
@@ -2544,6 +2552,7 @@ fn rename_nodes(ed: &mut Editor, a: &Args) -> ToolResult {
         "updates",
         "Rename",
         |u| Ok(u.req_str("name")?.chars().take(50).collect::<String>()),
+        |_| Ok(()),
         |tx, id, name| {
             tx.node_mut(id).unwrap().name = name.clone();
             Ok(())

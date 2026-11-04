@@ -349,6 +349,90 @@ fn editing_tools_update_move_duplicate_and_delete() {
 }
 
 #[test]
+fn set_text_content_validates_whole_batch_before_editing() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Batch", "styles": {"width": 300, "height": 200}}),
+    );
+    let created = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children", "html": "<p>First</p><div layer-name='Bad frame'></div><p>Last</p>"}),
+    );
+    let ids = created["createdNodeIds"].as_array().unwrap();
+    let (first, bad, last) = (ids[0].clone(), ids[1].clone(), ids[2].clone());
+    let before = h.ed.history.undo_len();
+    let err = exec::call(
+        &mut h,
+        "set_text_content",
+        &json!({"updates": [
+            {"nodeId": first, "textContent": "Changed"},
+            {"nodeId": bad, "textContent": "Nope"},
+            {"nodeId": last, "textContent": "Also changed"}
+        ]}),
+    )
+    .unwrap_err();
+    assert!(
+        err.contains(bad.as_str().unwrap()) && err.contains("Bad frame"),
+        "{err}"
+    );
+    assert_eq!(
+        h.ed.history.undo_len(),
+        before,
+        "failed batch must not add an undo step"
+    );
+    assert_eq!(
+        h.ed.doc
+            .get(num(&first))
+            .unwrap()
+            .kind
+            .text()
+            .map(String::as_str),
+        Some("First")
+    );
+    assert_eq!(
+        h.ed.doc
+            .get(num(&last))
+            .unwrap()
+            .kind
+            .text()
+            .map(String::as_str),
+        Some("Last")
+    );
+    let ok = call(
+        &mut h,
+        "set_text_content",
+        json!({"updates": [
+            {"nodeId": first, "textContent": "Changed"},
+            {"nodeId": last, "textContent": "Also changed"}
+        ]}),
+    );
+    assert_eq!(ok["updated"], 2);
+    assert_eq!(h.ed.history.undo_len(), before + 1);
+    call(&mut h, "undo", json!({}));
+    assert_eq!(
+        h.ed.doc
+            .get(num(&first))
+            .unwrap()
+            .kind
+            .text()
+            .map(String::as_str),
+        Some("First")
+    );
+    assert_eq!(
+        h.ed.doc
+            .get(num(&last))
+            .unwrap()
+            .kind
+            .text()
+            .map(String::as_str),
+        Some("Last")
+    );
+}
+
+#[test]
 fn pages_projects_and_whiteboard_shapes() {
     let mut h = host();
     let p = call(&mut h, "create_page", json!({"name": "Ideas"}));
