@@ -58,6 +58,9 @@ fn hug_size(doc: &Document, id: NodeId, axis: usize) -> f64 {
             let kn = doc.get(*k).unwrap();
             match kn.layout_child.sizing[axis] {
                 Sizing::Hug => hug_size(doc, *k, axis),
+                // A hug-sized cross axis needs its children's intrinsic sizes
+                // before stretch can distribute the measured line width.
+                Sizing::Fill if axis != main_axis(&l) => hug_size(doc, *k, axis),
                 Sizing::Fill => 0.0,
                 Sizing::Fixed => get(&kn.rect, axis).1,
             }

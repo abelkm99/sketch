@@ -139,6 +139,62 @@ fn artboard_and_html_become_auto_layout_frames_and_text() {
 }
 
 #[test]
+fn hug_sized_flex_containers_stretch_unsized_children() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Desktop", "styles": {"width": 400, "height": 400}}),
+    );
+    let result = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+               "html": r#"
+                 <div layer-name="Row" style="display:flex; width:fit-content; height:fit-content">
+                   <span>Label</span><div layer-name="VerticalRule" style="width:3px;background:#111"></div>
+                 </div>
+                 <div layer-name="Column" style="display:flex; flex-direction:column; width:fit-content">
+                   <span>Long label</span><div layer-name="Underline" style="height:2px;background:#111"></div>
+                 </div>
+                 <div layer-name="NoStretch" style="display:flex; flex-direction:column; width:fit-content; align-items:flex-start">
+                   <span>Long label</span><div layer-name="NoStretchRule" style="height:2px;background:#111"></div>
+                 </div>"#}),
+    );
+    let roots = result["createdNodeIds"].as_array().unwrap();
+    let row = h.ed.doc.get(num(&roots[0])).unwrap();
+    let row_label = h.ed.doc.get(row.children[0]).unwrap();
+    let vertical = h.ed.doc.get(row.children[1]).unwrap();
+    assert!(row.rect.h > 0.0);
+    assert_eq!(
+        vertical.rect.h, row_label.rect.h,
+        "a rule in a hug-height row should stretch"
+    );
+    assert_eq!(vertical.rect.w, 3.0);
+
+    let column = h.ed.doc.get(num(&roots[1])).unwrap();
+    let column_label = h.ed.doc.get(column.children[0]).unwrap();
+    let underline = h.ed.doc.get(column.children[1]).unwrap();
+    assert!(
+        column_label.rect.w > 0.0,
+        "text must contribute its intrinsic width"
+    );
+    assert_eq!(column.rect.w, column_label.rect.w);
+    assert_eq!(
+        underline.rect.w, column.rect.w,
+        "a rule in a hug-width column should stretch"
+    );
+    assert_eq!(underline.rect.h, 2.0);
+
+    let no_stretch = h.ed.doc.get(num(&roots[2])).unwrap();
+    let no_stretch_rule = h.ed.doc.get(no_stretch.children[1]).unwrap();
+    assert_eq!(
+        no_stretch_rule.rect.w, 0.0,
+        "explicit flex-start must not stretch"
+    );
+}
+
+#[test]
 fn reading_tools_describe_the_page() {
     let mut h = host();
     let ab = call(

@@ -1518,21 +1518,26 @@ impl Builder<'_, '_> {
         }
     }
 
-    /// Default sizing before explicit styles: stretch on the cross axis when the parent's
-    /// size there is definite.
+    /// Default CSS cross-axis stretch, even when the parent hugs its content.
+    /// For a hug-sized parent, leave the child's intrinsic width available until
+    /// layout measures it; the parent then stretches the child to the line width.
     fn stretch_default(parent: &Parent, n: &mut Node, styles: &Styles) {
         let Some(ca) = parent.cross() else { return };
         let explicit = get(styles, if ca == 0 { "width" } else { "height" }).is_some()
             || get(styles, "alignSelf").is_some_and(|v| v != "stretch")
             || matches!(get(styles, "position"), Some("absolute" | "fixed"));
-        if parent.stretch && parent.definite[ca] && !explicit {
+        if parent.stretch && !explicit {
             n.layout_child.sizing[ca] = Sizing::Fill;
-            if ca == 0
-                && let NodeKind::Text { auto_width, .. } = &mut n.kind
-            {
-                *auto_width = false;
+            if parent.definite[ca] {
+                if ca == 0
+                    && let NodeKind::Text { auto_width, .. } = &mut n.kind
+                {
+                    *auto_width = false;
+                }
             }
-            if let Some(ps) = parent.size {
+            if parent.definite[ca]
+                && let Some(ps) = parent.size
+            {
                 let pad = parent.layout.map_or([0.0; 4], |l| l.padding);
                 if ca == 0 {
                     n.rect.w = (ps.0 - pad[1] - pad[3]).max(1.0);
