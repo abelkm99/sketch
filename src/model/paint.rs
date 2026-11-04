@@ -277,12 +277,34 @@ pub struct TextSpan {
     pub strike: Option<bool>,
 }
 
+/// Bundled faces available to the vector text renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FontFamily {
+    #[default]
+    Inter,
+    NotoSansMono,
+}
+
+fn default_family(family: &FontFamily) -> bool {
+    *family == FontFamily::Inter
+}
+
 /// Node-wide text attributes beyond size and alignment.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct TextStyle {
     pub bold: bool,
+    /// Explicit CSS font weight; None preserves the legacy bold flag for old documents.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weight: Option<u16>,
+    #[serde(skip_serializing_if = "default_family")]
+    pub family: FontFamily,
     pub italic: bool,
+    /// Text layout and box overflow for CSS single-line ellipsis.
+    pub no_wrap: bool,
+    pub overflow_hidden: bool,
+    pub ellipsis: bool,
     /// Line height as a multiple of the font size (None = font default).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line_height: Option<f64>,
@@ -290,6 +312,60 @@ pub struct TextStyle {
     pub letter_spacing: f64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub spans: Vec<TextSpan>,
+    /// CSS text-transform, applied to the stored text when it is set.
+    #[serde(skip_serializing_if = "is_default_case")]
+    pub case: TextCase,
+    /// CSS `font-variant-numeric: tabular-nums`: every digit gets the same advance.
+    pub tabular_nums: bool,
+    /// CSS line-clamp: show at most this many lines, the last one ending in an ellipsis.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_clamp: Option<u16>,
+    /// Underline / strikethrough color (None = text color) and wavy style.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decoration_color: Option<Color>,
+    pub decoration_wavy: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextCase {
+    #[default]
+    None,
+    Upper,
+    Lower,
+    Capitalize,
+}
+
+fn is_default_case(c: &TextCase) -> bool {
+    *c == TextCase::None
+}
+
+impl TextCase {
+    /// Change case one char at a time, keeping the char count so rich-text runs still line up.
+    pub fn apply(self, text: &str) -> String {
+        let one = |c: char, up: bool| {
+            let mut m: Vec<char> = if up {
+                c.to_uppercase().collect()
+            } else {
+                c.to_lowercase().collect()
+            };
+            if m.len() == 1 { m.pop().unwrap() } else { c }
+        };
+        let mut word_start = true;
+        text.chars()
+            .map(|c| {
+                let out = match self {
+                    TextCase::None => c,
+                    TextCase::Upper => one(c, true),
+                    TextCase::Lower => one(c, false),
+                    TextCase::Capitalize if word_start => one(c, true),
+                    TextCase::Capitalize => c,
+                };
+                word_start = c.is_whitespace();
+                out
+            })
+            .collect()
+    }
 }
 
 impl TextStyle {
@@ -302,6 +378,8 @@ impl TextStyle {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CharStyle {
     pub bold: bool,
+    pub weight: u16,
+    pub family: FontFamily,
     pub italic: bool,
     pub size: f64,
     pub color: Color,
@@ -313,6 +391,8 @@ impl TextStyle {
     pub fn char_style(&self, i: usize, size: f64, color: Color) -> CharStyle {
         let mut s = CharStyle {
             bold: self.bold,
+            weight: self.weight.unwrap_or(if self.bold { 700 } else { 400 }),
+            family: self.family,
             italic: self.italic,
             size,
             color,
@@ -323,6 +403,7 @@ impl TextStyle {
             if i >= sp.start && i < sp.end {
                 if let Some(b) = sp.bold {
                     s.bold = b;
+                    s.weight = if b { 700 } else { 400 };
                 }
                 if let Some(b) = sp.italic {
                     s.italic = b;
@@ -492,6 +573,16 @@ pub struct AutoLayout {
     pub padding: [f64; 4],
     pub align_main: Align,
     pub align_cross: Align,
+    /// CSS box model: inside borders inset the children like extra padding.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub border_box: bool,
+    /// CSS grid column count (0 = flex). Children fill equal tracks, row by row.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub columns: u16,
+}
+
+fn is_zero(n: &u16) -> bool {
+    *n == 0
 }
 
 impl Default for AutoLayout {
@@ -505,6 +596,8 @@ impl Default for AutoLayout {
             padding: [10.0; 4],
             align_main: Align::Start,
             align_cross: Align::Start,
+            border_box: false,
+            columns: 0,
         }
     }
 }
@@ -542,17 +635,38 @@ pub struct Constraints {
 }
 
 /// Per-node layout participation (as a child of an auto-layout or constrained frame).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LayoutChild {
     /// Horizontal and vertical sizing.
     pub sizing: [Sizing; 2],
+    /// CSS min/max constraints (width, height), in document pixels.
+    pub min_size: [Option<f64>; 2],
+    pub max_size: [Option<f64>; 2],
+    /// CSS margins (top, right, bottom, left) outside the layout box.
+    pub margin: [f64; 4],
     /// Ignore auto layout (positioned by constraints instead).
     pub absolute: bool,
     pub constraints: Constraints,
+    /// CSS `position: relative` shift (x, y), applied after layout without moving siblings.
+    pub offset: [f64; 2],
+    /// CSS `auto` margins (top, right, bottom, left): they share the line's free space.
+    pub margin_auto: [bool; 4],
+    /// CSS `align-self` (None = the parent's align-items).
+    pub align_self: Option<Align>,
+    /// CSS `order`: flow position among siblings (stable for equal values).
+    pub order: i32,
+    /// CSS `aspect-ratio` (width / height): layout derives the height from the width.
+    pub aspect: Option<f64>,
 }
 
 impl LayoutChild {
+    pub fn constrain(&self, axis: usize, size: f64) -> f64 {
+        let max = self.max_size[axis].unwrap_or(f64::INFINITY);
+        let min = self.min_size[axis].unwrap_or(0.0);
+        size.min(max).max(min) // CSS min wins over max if they conflict.
+    }
+
     pub fn is_default(&self) -> bool {
         *self == LayoutChild::default()
     }

@@ -1,11 +1,11 @@
 //! Text layout and glyph outlines.
 //!
 //! Text is rendered as vector glyph outlines, so it stays crisp at every zoom level and
-//! exports to SVG without font dependencies. The face is Inter Regular (SIL OFL, bundled in assets/fonts),
-//! not anything taken from Paper.
+//! exports to SVG without font dependencies. Bundled Inter and Noto Sans Mono faces
+//! (SIL OFL; see assets/fonts/) provide weights, monospace and missing-glyph fallback.
 
 use crate::geom::{V2, v2};
-use crate::model::{CharStyle, Color, TextAlign, TextStyle};
+use crate::model::{CharStyle, Color, FontFamily, TextAlign, TextStyle};
 use crate::vector::VPath;
 use lyon::path::Path;
 use lyon::tessellation::{BuffersBuilder, FillOptions, FillTessellator, FillVertex, VertexBuffers};
@@ -14,31 +14,67 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 pub static FONT_BYTES: &[u8] = crate::theme::INTER_REGULAR;
 static BOLD: &[u8] = include_bytes!("../assets/fonts/Inter-Bold.ttf");
+static MEDIUM: &[u8] = include_bytes!("../assets/fonts/Inter-Medium.ttf");
+static SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Inter-SemiBold.ttf");
 static ITALIC: &[u8] = include_bytes!("../assets/fonts/Inter-Italic.ttf");
 static BOLD_ITALIC: &[u8] = include_bytes!("../assets/fonts/Inter-BoldItalic.ttf");
+// Noto Sans Mono (SIL OFL 1.1); see assets/fonts/NOTO-LICENSE.txt.
+static MONO: &[u8] = include_bytes!("../assets/fonts/NotoSansMono-Regular.ttf");
+static MONO_BOLD: &[u8] = include_bytes!("../assets/fonts/NotoSansMono-Bold.ttf");
 
-/// Face index: bit 0 = bold, bit 1 = italic.
+/// Face index: 0–3 retain the legacy regular/bold/italic/bold-italic IDs;
+/// 4 = Medium, 5 = SemiBold; 6–7 = Noto Sans Mono regular/bold.
 pub type FaceId = u8;
 
 pub fn face_id(bold: bool, italic: bool) -> FaceId {
     bold as u8 | (italic as u8) << 1
 }
 
+pub fn weight_face_id(weight: u16, italic: bool) -> FaceId {
+    if italic {
+        // Only regular and bold italic are bundled. Use the nearest available italic.
+        return face_id(weight >= 600, true);
+    }
+    match weight {
+        0..=449 => 0,
+        450..=549 => 4,
+        550..=649 => 5,
+        _ => 1,
+    }
+}
+
+pub fn family_face_id(weight: u16, italic: bool, family: FontFamily) -> FaceId {
+    match family {
+        FontFamily::Inter => weight_face_id(weight, italic),
+        FontFamily::NotoSansMono => {
+            if weight >= 600 {
+                7
+            } else {
+                6
+            }
+        }
+    }
+}
+
 pub fn face_bytes(id: FaceId) -> &'static [u8] {
-    match id & 3 {
-        0 => FONT_BYTES,
+    match id {
         1 => BOLD,
         2 => ITALIC,
-        _ => BOLD_ITALIC,
+        3 => BOLD_ITALIC,
+        4 => MEDIUM,
+        5 => SEMIBOLD,
+        6 => MONO,
+        7 => MONO_BOLD,
+        _ => FONT_BYTES,
     }
 }
 
 pub fn face_of(id: FaceId) -> &'static ttf_parser::Face<'static> {
-    static FACES: OnceLock<[ttf_parser::Face<'static>; 4]> = OnceLock::new();
+    static FACES: OnceLock<[ttf_parser::Face<'static>; 8]> = OnceLock::new();
     &FACES.get_or_init(|| {
-        [0, 1, 2, 3]
+        [0, 1, 2, 3, 4, 5, 6, 7]
             .map(|i| ttf_parser::Face::parse(face_bytes(i), 0).expect("bundled font parses"))
-    })[(id & 3) as usize]
+    })[(id as usize).min(7)]
 }
 
 pub fn face() -> &'static ttf_parser::Face<'static> {
@@ -97,20 +133,28 @@ pub struct TextLayout {
     pub font_size: f64,
 }
 
-fn advance_in(face: FaceId, c: char, font_size: f64) -> (u16, f64) {
+fn advance_in(preferred: FaceId, c: char, font_size: f64) -> (FaceId, u16, f64) {
+    let secondary = if preferred >= 6 { 0 } else { 6 };
+    let (face, glyph) = [preferred, secondary]
+        .into_iter()
+        .find_map(|id| face_of(id).glyph_index(c).map(|gid| (id, gid)))
+        .unwrap_or_else(|| {
+            (
+                preferred,
+                face_of(preferred)
+                    .glyph_index('?')
+                    .unwrap_or(ttf_parser::GlyphId(0)),
+            )
+        });
     let f = face_of(face);
-    let gid = f
-        .glyph_index(c)
-        .or_else(|| f.glyph_index('?'))
-        .map(|g| g.0)
-        .unwrap_or(0);
-    let adv = f.glyph_hor_advance(ttf_parser::GlyphId(gid)).unwrap_or(0) as f64;
-    (gid, adv / f.units_per_em() as f64 * font_size)
+    let adv = f.glyph_hor_advance(glyph).unwrap_or(0) as f64;
+    (face, glyph.0, adv / f.units_per_em() as f64 * font_size)
 }
 
 #[cfg(test)]
 fn advance(c: char, font_size: f64) -> (u16, f64) {
-    advance_in(0, c, font_size)
+    let (_, gid, adv) = advance_in(0, c, font_size);
+    (gid, adv)
 }
 
 /// Lay out plain text with optional wrapping at `max_width`.
@@ -139,12 +183,23 @@ pub fn layout_rich(
         .map(|i| ts.char_style(i, font_size, color))
         .collect();
     let ls = ts.letter_spacing;
-    let adv: Vec<(u16, f64)> = chars
+    // Tabular digits: each digit is centered in a cell as wide as the widest digit.
+    let mut pad = vec![0.0; chars.len()];
+    let adv: Vec<(FaceId, u16, f64)> = chars
         .iter()
         .zip(&styles)
-        .map(|(c, s)| {
-            let (g, a) = advance_in(face_id(s.bold, s.italic), *c, s.size);
-            (g, a + ls)
+        .enumerate()
+        .map(|(i, (c, s))| {
+            let pref = family_face_id(s.weight, s.italic, s.family);
+            let (face, g, mut a) = advance_in(pref, *c, s.size);
+            if ts.tabular_nums && c.is_ascii_digit() {
+                let cell = ('0'..='9')
+                    .map(|d| advance_in(pref, d, s.size).2)
+                    .fold(0.0, f64::max);
+                pad[i] = (cell - a) * 0.5;
+                a = cell;
+            }
+            (face, g, a + ls)
         })
         .collect();
     let lh_of = |size: f64| match ts.line_height {
@@ -165,7 +220,7 @@ pub fn layout_rich(
             let mut last_space: Option<usize> = None;
             let mut i = line_start;
             while i < hard_end {
-                let a = adv[i].1;
+                let a = adv[i].2;
                 if chars[i] == ' ' {
                     last_space = Some(i);
                 }
@@ -212,13 +267,13 @@ pub fn layout_rich(
         let mut carets = vec![0.0];
         for i in s..e {
             let st = styles[i];
-            let (gid, a) = adv[i];
+            let (face, gid, a) = adv[i];
             glyphs.push(PlacedGlyph {
                 gid,
-                face: face_id(st.bold, st.italic),
+                face,
                 size: st.size,
                 color: st.color,
-                x,
+                x: x + pad[i],
                 baseline,
                 advance: a,
                 char_index: i,
@@ -492,14 +547,120 @@ pub fn layout_node(n: &crate::model::Node) -> Option<TextLayout> {
         .fills
         .last()
         .map_or(Color::INK, |p| p.preview_color());
-    Some(layout_rich(
+    let limit = (!auto_width).then_some(n.rect.w);
+    let mut layout = layout_rich(
         text,
         *font_size,
         color,
         &n.text_style,
-        (!auto_width).then_some(n.rect.w),
+        if n.text_style.no_wrap { None } else { limit },
         *align,
-    ))
+    );
+    if let Some(max) = n.text_style.line_clamp {
+        clamp_lines(&mut layout, max.max(1) as usize, limit);
+    }
+    if n.text_style.overflow_hidden
+        && let Some(width) = limit
+    {
+        clip_text_lines(
+            &mut layout,
+            width,
+            n.text_style.ellipsis && n.text_style.no_wrap,
+        );
+    }
+    Some(layout)
+}
+
+/// Keep the first `max` lines; when text is cut, the last kept line ends in an ellipsis
+/// (within `width` when the box has one).
+fn clamp_lines(layout: &mut TextLayout, max: usize, width: Option<f64>) {
+    if layout.lines.len() <= max {
+        return;
+    }
+    layout.lines.truncate(max);
+    let last = layout.lines.last_mut().unwrap();
+    layout.glyphs.retain(|g| g.char_index < last.end);
+    layout.height = last.top + last.height;
+    let Some(reference) = layout
+        .glyphs
+        .iter()
+        .rev()
+        .find(|g| g.char_index >= last.start)
+        .copied()
+    else {
+        return;
+    };
+    let (face, gid, advance) = advance_in(reference.face, '…', reference.size);
+    let limit = width.unwrap_or(f64::INFINITY);
+    let start = last.start;
+    // Drop trailing glyphs until the ellipsis fits.
+    while let Some(g) = layout.glyphs.last() {
+        if g.char_index >= start && g.x + g.advance + advance > limit + 1e-9 {
+            layout.glyphs.pop();
+        } else {
+            break;
+        }
+    }
+    let x = layout
+        .glyphs
+        .iter()
+        .rev()
+        .find(|g| g.char_index >= start)
+        .map_or(last.carets[0], |g| g.x + g.advance);
+    layout.glyphs.push(PlacedGlyph {
+        gid,
+        face,
+        x,
+        advance,
+        char_index: last.end.saturating_sub(1),
+        underline: false,
+        strike: false,
+        ..reference
+    });
+    last.width = x + advance;
+    layout.width = layout.lines.iter().map(|l| l.width).fold(0.0, f64::max);
+}
+
+/// Keep whole glyph outlines inside a text box. On a no-wrap line, replace the
+/// overflowing tail with an ellipsis (without changing the underlying editable text).
+fn clip_text_lines(layout: &mut TextLayout, width: f64, ellipsis: bool) {
+    let mut visible = Vec::new();
+    for line in &mut layout.lines {
+        let mut glyphs: Vec<PlacedGlyph> = layout
+            .glyphs
+            .iter()
+            .filter(|g| g.char_index >= line.start && g.char_index < line.end)
+            .copied()
+            .collect();
+        let mut tail = None;
+        if line.width > width + 1e-9 && ellipsis && !glyphs.is_empty() {
+            let reference = glyphs[0];
+            let (face, gid, advance) = advance_in(reference.face, '…', reference.size);
+            let budget = (width - advance).max(0.0);
+            glyphs.retain(|g| g.x + g.advance <= budget + 1e-9);
+            let x = glyphs.last().map_or(0.0, |g| g.x + g.advance);
+            if x + advance <= width + 1e-9 {
+                tail = Some(PlacedGlyph {
+                    gid,
+                    face,
+                    size: reference.size,
+                    color: glyphs.last().unwrap_or(&reference).color,
+                    x,
+                    baseline: reference.baseline,
+                    advance,
+                    char_index: line.end.saturating_sub(1),
+                    underline: false,
+                    strike: false,
+                });
+            }
+        }
+        glyphs.retain(|g| g.x + g.advance <= width + 1e-9);
+        visible.extend(glyphs);
+        visible.extend(tail);
+        line.width = line.width.min(width);
+    }
+    layout.glyphs = visible;
+    layout.width = layout.width.min(width);
 }
 
 #[cfg(test)]

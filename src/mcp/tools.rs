@@ -17,10 +17,11 @@ looking at). Use list_resources / open_file / create_file to pick a project.
 switching the user's view. Node ids are opaque strings; never show them to the user.
 - Build UI with create_artboard, then write_html into it, one visual group per call (a header, \
 a row, a card) so the user sees progress. Inline styles only; flexbox (display:flex, gap, \
-padding, align-items, justify-content) is the layout model; no margin, grid or tables.
+padding, margin, align-items, justify-content) is the layout model; no grid or tables.
 - Text uses Inter (regular, bold, italic). Use px for font sizes.
 - Edit with update_styles, set_text_content, rename_nodes, duplicate_nodes, move_nodes, \
-delete_nodes. Whiteboard shapes, sticky notes and arrows: create_shape. Hand-drawn style: \
+delete_nodes. Reuse designs with create_component, create_instance, set_instance_overrides. \
+Whiteboard shapes, sticky notes and arrows: create_shape. Hand-drawn style: \
 update_styles with {\"sketch\": true, \"roughness\": 1, \"fillStyle\": \"hachure\"}.
 - Check your work with get_screenshot. Artboard height is a starting point: when content \
 clips set height: \"fit-content\" with update_styles.
@@ -214,13 +215,15 @@ pub fn definitions() -> Vec<Value> {
         tool(
             "find_nodes",
             "Find nodes by text content and/or computed style. Searches the whole project by \
-             default; pass pageId for one page or nodeId for a subtree. `textValue` matches text \
-             case-insensitively with * wildcards anchored to the whole value. `filters` are \
-             {styleName, styleValue} pairs (AND), values may use * wildcards; colors match by value.",
+             default; pass pageId for one page or nodeId for a subtree. `textValue` (or `query`) \
+             matches a case-insensitive substring by default; with * wildcards it matches the \
+             entire text. `filters` are {styleName, styleValue} pairs (AND), values may use * \
+             wildcards; colors match by value.",
             json!({
                 "pageId": page_id(),
                 "nodeId": node_id("Optional subtree root; takes priority over pageId."),
                 "textValue": {"type": "string"},
+                "query": {"type": "string", "description": "Alias for textValue; textValue takes priority when both are provided."},
                 "filters": {"type": "array", "items": {"type": "object", "properties": {
                     "styleName": {"type": "string"}, "styleValue": {"type": "string"}}}},
             }),
@@ -229,8 +232,9 @@ pub fn definitions() -> Vec<Value> {
         ),
         tool(
             "get_font_family_info",
-            "Whether font families are available and their weights/styles. Sketch renders text \
-             with Inter (400, 700, normal and italic); other families fall back to Inter.",
+            "Whether font families are available and their weights/styles. Bundled Inter supports \
+             400/500/600/700 (italic 400/700), and Noto Sans Mono supports regular/bold; \
+             other families fall back to Inter.",
             json!({"familyNames": {"type": "array", "items": {"type": "string"}}}),
             &["familyNames"],
             true,
@@ -304,11 +308,11 @@ pub fn definitions() -> Vec<Value> {
              \"replace\" replaces targetNodeId with it.\n\
              - Inline styles only. Flexbox (display:flex, flex-direction, gap, padding, \
              align-items, justify-content, flex-grow, flex-wrap) is the layout model; block \
-             elements stack vertically. position:absolute with left/top is supported. No margin, \
-             grid or tables.\n\
-             - Text: font-size, font-weight (≥600 = bold), font-style, color, line-height, \
-             letter-spacing, text-align, text-decoration; <b>/<i>/<u>/<s>/<span style> make rich \
-             text. Font family is always Inter.\n\
+             elements stack vertically. position:absolute with left/top and flex-child margins \
+             are supported. No grid or tables.\n\
+             - Text: font-size, font-weight (bundled Inter 400/500/600/700), font-style, color, \
+             line-height, letter-spacing, text-align, text-decoration; <b>/<i>/<u>/<s>/<span style> \
+             make rich text. Inter and Noto Sans Mono (font-family:monospace) are bundled.\n\
              - Boxes: background(-color/-image: colors, linear/radial gradients, url()), border, \
              border-radius, opacity, overflow:hidden, mix-blend-mode, width/height (px, %, \
              fit-content).\n\
@@ -316,7 +320,8 @@ pub fn definitions() -> Vec<Value> {
              <svg> markup is imported as vector layers.\n\
              - layer-name=\"...\" names layers; <x-sketch-clone node-id=\"ID\" style=\"...\"/> \
              clones an existing node.\n\
-             Returns the ids of the created top-level layers and the styles that were ignored.",
+             Returns createdNodeIds for top-level layers (compatibility), plus created with \
+             every new layer's id, name and parent, and any ignored styles.",
             json!({
                 "html": {"type": "string", "description": "HTML to parse into layers."},
                 "targetNodeId": {"type": "string", "description": "Target node id, or \"root\" for the page."},
@@ -373,11 +378,11 @@ pub fn definitions() -> Vec<Value> {
         ),
         tool(
             "set_text_content",
-            "Set the text of one or more Text or Sticky nodes (batch).",
+            "Replace the text of Text or Sticky nodes (batch). Pass plain textContent to reset old rich-text runs, or html for inline formatting (b, span styles, etc.). If both are sent, html wins.",
             json!({"updates": {"type": "array", "items": {
                 "type": "object",
-                "properties": {"nodeId": {"type": "string"}, "textContent": {"type": "string"}},
-                "required": ["nodeId", "textContent"],
+                "properties": {"nodeId": {"type": "string"}, "textContent": {"type": "string"}, "html": {"type": "string"}},
+                "required": ["nodeId"],
             }}}),
             &["updates"],
             false,
@@ -411,6 +416,29 @@ pub fn definitions() -> Vec<Value> {
                 "required": ["id"],
             }}}),
             &["nodes"],
+            false,
+        ),
+        tool(
+            "create_component",
+            "Mark an existing frame as a main component without changing the user's selection. Returns componentId.",
+            json!({"nodeId": node_id("Existing frame to make a main component.")}),
+            &["nodeId"],
+            false,
+        ),
+        tool(
+            "create_instance",
+            "Create a linked instance of a main component, optionally under a frame/group. Coordinates x/y are local to parentId (or world coordinates for root). Returns instanceId and all created descendants with their corresponding mainId.",
+            json!({"componentId": node_id("Main component on the same page."),
+                "parentId": node_id("Optional frame/group; omit or use root for page root."),
+                "x": {"type": "number"}, "y": {"type": "number"}}),
+            &["componentId"],
+            false,
+        ),
+        tool(
+            "set_instance_overrides",
+            "Set a text override on a text layer inside an instance; subsequent edits to the main component leave this text alone. Plain text replaces old rich-text runs.",
+            json!({"nodeId": node_id("Text layer inside an instance."), "text": {"type": "string"}}),
+            &["nodeId", "text"],
             false,
         ),
         tool(
@@ -505,8 +533,17 @@ display (flex, block, none), flex-direction, flex-wrap, gap, row-gap, column-gap
 justify-content, align-items, align-self, flex-grow, overflow, background, background-color,
 background-image (url(), linear-gradient(), radial-gradient()), background-size/object-fit,
 border, border-color/width/style, border-radius (1–4 values), opacity, mix-blend-mode, color,
-font-size, font-weight, font-style, line-height, letter-spacing, text-align, text-decoration.
-Ignored (reported back): margin, grid, box-shadow, transform, filters, transitions.";
+font-size, font-weight, font-style, line-height, letter-spacing, text-align, text-decoration,
+box-shadow (comma-separated layers, outer and inset), transform: rotate() and rotate
+(the layer and its children turn when drawn; layout keeps the unrotated box, like CSS),
+outline (drawn outside, takes no space), position:relative with top/left/right/bottom,
+margin/margin-inline auto, align-self, order, aspect-ratio, calc() (+ - * /; % resolves
+against the parent's size once), display:grid with grid-template-columns of equal fr tracks
+(other track sizes come out equal and are reported), text-transform,
+font-variant-numeric: tabular-nums, line-clamp / -webkit-line-clamp, text-decoration
+color and wavy style.
+Ignored (reported back): grid track sizes other than fr, grid areas/spans, other transforms
+(translate, scale), filters, backdrop blur, transitions, dotted/dashed/double underlines.";
 
 pub const GUIDE_WHITEBOARD: &str = "\
 # Whiteboard elements

@@ -57,16 +57,26 @@ pub fn export_bounds(doc: &Document, roots: &[NodeId]) -> Option<Rect> {
             if nd.is_group() || !doc.is_effectively_visible(id) {
                 continue;
             }
-            // Children of clipping frames can't draw outside them.
-            if doc.ancestors(id).iter().any(|a| {
-                matches!(
-                    doc.get(*a).map(|x| &x.kind),
-                    Some(NodeKind::Frame { clip: true })
-                )
-            }) {
+            // A selected node can have a clipping artboard *outside* this export.
+            // Only clips at or below the selected root bound its descendants; the
+            // root itself still contributes its own bounds.
+            let mut ancestor = if id == *r { None } else { nd.parent };
+            let mut clipped = false;
+            while let Some(a) = ancestor {
+                let Some(parent) = doc.get(a) else { break };
+                if matches!(parent.kind, NodeKind::Frame { clip: true }) {
+                    clipped = true;
+                    break;
+                }
+                if a == *r {
+                    break;
+                }
+                ancestor = parent.parent;
+            }
+            if clipped {
                 continue;
             }
-            rects.push(draw::draw_bounds(nd, wr));
+            rects.push(draw::turned(doc, id, draw::draw_bounds(nd, wr)));
         }
     }
     Rect::union_all(&rects).map(|r| {
@@ -313,13 +323,20 @@ impl Writer<'_> {
             "{ind}<g id=\"n{}\" data-name=\"{label}\"{aria}{blend}>",
             id.0
         );
-        let d = draw::node_draw(nd, wr, op);
+        let xf = draw::world_xf(doc, id);
+        let mut d = draw::node_draw(nd, wr, op);
+        if let Some(x) = &xf {
+            d.ops = draw::transform_ops(d.ops, x);
+        }
         self.ops(&d.ops, &format!("{ind}  "));
         if !nd.children.is_empty() {
             let clip = matches!(nd.kind, NodeKind::Frame { clip: true });
             if clip {
                 let cid = self.def_id("clip");
-                let path = draw::shape_path(nd, wr).unwrap_or_default();
+                let mut path = draw::shape_path(nd, wr).unwrap_or_default();
+                if let Some(x) = &xf {
+                    path = path.map(|p| x.apply(p));
+                }
                 let _ = write!(
                     self.defs,
                     "<clipPath id=\"{cid}\"><path d=\"{}\"/></clipPath>",
@@ -434,6 +451,56 @@ mod tests {
         }
         assert_eq!(svg.matches("<g").count(), svg.matches("</g>").count());
         assert!(!svg.contains("NaN"));
+    }
+
+    #[test]
+    fn export_bounds_of_layer_inside_clipping_artboard() {
+        use crate::model::Node;
+
+        let mut ed = crate::editor::Editor::default();
+        let artboard = ed.add_node(
+            Node::new(
+                NodeId(0),
+                NodeKind::Frame { clip: true },
+                Rect::new(10.0, 20.0, 200.0, 120.0),
+            ),
+            None,
+        );
+        let frame = ed.add_node(
+            Node::new(
+                NodeId(0),
+                NodeKind::Frame { clip: true },
+                Rect::new(15.0, 17.0, 70.0, 50.0),
+            ),
+            Some(artboard),
+        );
+        // Children outside the frame must not make its export larger than its own clip.
+        ed.add_node(
+            Node::new(NodeId(0), NodeKind::Rect, Rect::new(60.0, 10.0, 70.0, 20.0)),
+            Some(frame),
+        );
+        assert_eq!(export_bounds(&ed.doc, &[frame]), ed.doc.world_rect(frame));
+        assert!(export(&ed.doc, Some(&[frame]), None).is_some());
+
+        // Groups have no drawable bounds themselves; their visible children still count
+        // even when an ancestor outside the selection clips.
+        let (group, child) = ed.edit("Add group", |tx| {
+            let group = tx.alloc_id();
+            tx.insert(
+                Node::new(group, NodeKind::Group, Rect::new(3.0, 4.0, 0.0, 0.0)),
+                Some(artboard),
+                None,
+            );
+            let child = tx.alloc_id();
+            tx.insert(
+                Node::new(child, NodeKind::Rect, Rect::new(2.0, 3.0, 10.0, 12.0)),
+                Some(group),
+                None,
+            );
+            (group, child)
+        });
+        assert_eq!(export_bounds(&ed.doc, &[group]), ed.doc.world_rect(child));
+        assert!(export(&ed.doc, Some(&[group]), None).is_some());
     }
 
     #[test]

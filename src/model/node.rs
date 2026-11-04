@@ -5,6 +5,7 @@ use super::paint::{
 };
 use crate::geom::{Rect, V2};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::BTreeMap;
 use std::fmt;
 
 #[derive(
@@ -80,14 +81,52 @@ impl<'de> Deserialize<'de> for Color {
     }
 }
 
+/// A CSS outer box shadow in local document pixels.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoxShadow {
+    pub x: f64,
+    pub y: f64,
+    pub blur: f64,
+    pub spread: f64,
+    pub color: Color,
+    /// Drawn inside the box, over its fill (CSS `inset`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inset: bool,
+}
+
+/// An inside box border on one edge (top, right, bottom or left).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SideBorder {
+    pub color: Color,
+    pub width: f64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dash: Vec<f64>,
+}
+
+fn no_border_sides(sides: &[Option<SideBorder>; 4]) -> bool {
+    sides.iter().all(Option::is_none)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Style {
+    /// Inherited CSS custom properties, retained for later MCP style updates.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub variables: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub shadows: Vec<BoxShadow>,
+    /// CSS `rotate`, in degrees clockwise about the box center. Turns the layer and its
+    /// children when drawn; layout and hit testing keep the unrotated box, like CSS.
+    #[serde(skip_serializing_if = "is_default")]
+    pub rotation: f64,
     /// Fill layers, bottom to top.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub fills: Vec<Paint>,
     pub stroke: Option<Color>,
     pub stroke_width: f64,
+    /// Optional inside borders (top, right, bottom, left), independent of the full outline.
+    #[serde(skip_serializing_if = "no_border_sides")]
+    pub border_sides: [Option<SideBorder>; 4],
     #[serde(skip_serializing_if = "is_default")]
     pub stroke_align: StrokeAlign,
     /// Dash pattern (lengths in px); empty = solid.
@@ -117,9 +156,13 @@ fn is_default<T: Default + PartialEq>(t: &T) -> bool {
 impl Default for Style {
     fn default() -> Self {
         Style {
+            variables: BTreeMap::new(),
+            shadows: Vec::new(),
+            rotation: 0.0,
             fills: Vec::new(),
             stroke: None,
             stroke_width: 1.0,
+            border_sides: [None, None, None, None],
             stroke_align: StrokeAlign::Center,
             dash: Vec::new(),
             cap: Cap::Butt,
@@ -259,6 +302,9 @@ pub enum NodeKind {
 fn yes() -> bool {
     true
 }
+fn zero_offset(v: &V2) -> bool {
+    *v == V2::ZERO
+}
 fn arrow_head() -> Head {
     Head::Arrow
 }
@@ -370,6 +416,9 @@ pub struct Node {
     pub kind: NodeKind,
     /// Bounds relative to the parent frame's origin (or the world for root nodes).
     pub rect: Rect,
+    /// Offset of a clipping frame's scroll viewport, in its own local coordinates.
+    #[serde(default, skip_serializing_if = "zero_offset")]
+    pub scroll_offset: V2,
     #[serde(default)]
     pub style: Style,
     #[serde(default = "yes")]
@@ -462,6 +511,7 @@ impl Node {
             name: kind.type_name().to_string(),
             kind,
             rect,
+            scroll_offset: V2::ZERO,
             style,
             visible: true,
             locked: false,

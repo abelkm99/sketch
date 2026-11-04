@@ -19,6 +19,24 @@ fn get(r: &Rect, axis: usize) -> (f64, f64) {
     if axis == 0 { (r.x, r.w) } else { (r.y, r.h) }
 }
 
+fn margins(m: &[f64; 4], axis: usize) -> (f64, f64) {
+    if axis == 0 {
+        (m[3], m[1])
+    } else {
+        (m[0], m[2])
+    }
+}
+
+/// Whether the (before, after) margins on an axis are `auto`.
+fn autos(lc: &crate::model::LayoutChild, axis: usize) -> (bool, bool) {
+    let m = lc.margin_auto;
+    if axis == 0 {
+        (m[3], m[1])
+    } else {
+        (m[0], m[2])
+    }
+}
+
 fn set(r: &mut Rect, axis: usize, pos: f64, size: f64) {
     if axis == 0 {
         r.x = pos;
@@ -31,14 +49,36 @@ fn set(r: &mut Rect, axis: usize, pos: f64, size: f64) {
 
 /// Children that take part in the flow.
 pub fn flow_children(doc: &Document, id: NodeId) -> Vec<NodeId> {
-    doc.children(Some(id))
+    let mut kids: Vec<NodeId> = doc
+        .children(Some(id))
         .iter()
         .copied()
         .filter(|c| {
             doc.get(*c)
                 .is_some_and(|n| n.visible && !n.layout_child.absolute)
         })
-        .collect()
+        .collect();
+    kids.sort_by_key(|k| doc.get(*k).map_or(0, |n| n.layout_child.order)); // CSS `order`
+    kids
+}
+
+/// Padding (top, right, bottom, left) plus inside border widths for CSS box-model frames.
+fn padding(n: &crate::model::Node, l: &AutoLayout) -> [f64; 4] {
+    let mut p = l.padding;
+    if l.border_box {
+        let s = &n.style;
+        let outline = match s.stroke {
+            Some(_) if s.stroke_align == crate::model::StrokeAlign::Inside => s.stroke_width,
+            _ => 0.0,
+        };
+        for (i, side) in p.iter_mut().enumerate() {
+            *side += s.border_sides[i]
+                .as_ref()
+                .map_or(0.0, |b| b.width)
+                .max(outline);
+        }
+    }
+    p
 }
 
 /// Intrinsic (hug) size of a node along an axis, without changing anything.
@@ -47,20 +87,25 @@ fn hug_size(doc: &Document, id: NodeId, axis: usize) -> f64 {
     let (_, cur) = get(&n.rect, axis);
     let Some(l) = n.layout else { return cur };
     let kids = flow_children(doc, id);
-    let pad = if axis == 0 {
-        l.padding[3] + l.padding[1]
-    } else {
-        l.padding[0] + l.padding[2]
-    };
+    let p = padding(n, &l);
+    let pad = if axis == 0 { p[3] + p[1] } else { p[0] + p[2] };
     let sizes: Vec<f64> = kids
         .iter()
         .map(|k| {
             let kn = doc.get(*k).unwrap();
-            match kn.layout_child.sizing[axis] {
+            let size = match kn.layout_child.sizing[axis] {
                 Sizing::Hug => hug_size(doc, *k, axis),
+                // A hug-sized cross axis needs its children's intrinsic sizes
+                // before stretch can distribute the measured line width.
+                Sizing::Fill if axis != main_axis(&l) => hug_size(doc, *k, axis),
                 Sizing::Fill => 0.0,
-                Sizing::Fixed => get(&kn.rect, axis).1,
-            }
+                Sizing::Fixed => match kn.layout_child.aspect {
+                    Some(ar) if axis == 1 => kn.rect.w / ar,
+                    _ => get(&kn.rect, axis).1,
+                },
+            };
+            let (before, after) = margins(&kn.layout_child.margin, axis);
+            size + before + after
         })
         .collect();
     if axis == main_axis(&l) && !l.wrap {
@@ -77,7 +122,11 @@ fn hug_size(doc: &Document, id: NodeId, axis: usize) -> f64 {
             .iter()
             .map(|line| {
                 line.iter()
-                    .map(|k| get(&doc.get(*k).unwrap().rect, axis).1)
+                    .map(|k| {
+                        let kn = doc.get(*k).unwrap();
+                        let m = margins(&kn.layout_child.margin, axis);
+                        get(&kn.rect, axis).1 + m.0 + m.1
+                    })
                     .fold(0.0, f64::max)
             })
             .collect();
@@ -89,22 +138,26 @@ fn hug_size(doc: &Document, id: NodeId, axis: usize) -> f64 {
 
 fn wrap_lines(
     doc: &Document,
-    _id: NodeId,
+    id: NodeId,
     l: &AutoLayout,
     main_size: f64,
     kids: &[NodeId],
 ) -> Vec<Vec<NodeId>> {
     let ma = main_axis(l);
-    let inner = main_size
-        - if ma == 0 {
-            l.padding[3] + l.padding[1]
-        } else {
-            l.padding[0] + l.padding[2]
-        };
+    let p = padding(doc.get(id).unwrap(), l);
+    let inner = main_size - if ma == 0 { p[3] + p[1] } else { p[0] + p[2] };
+    if l.columns > 0 {
+        return kids
+            .chunks(l.columns as usize)
+            .map(|c| c.to_vec())
+            .collect();
+    }
     let mut lines: Vec<Vec<NodeId>> = vec![Vec::new()];
     let mut x = 0.0;
     for k in kids {
-        let s = get(&doc.get(*k).unwrap().rect, ma).1;
+        let n = doc.get(*k).unwrap();
+        let (before, after) = margins(&n.layout_child.margin, ma);
+        let s = get(&n.rect, ma).1 + before + after;
         let line = lines.last_mut().unwrap();
         if !line.is_empty() && x + l.gap + s > inner + 1e-9 {
             lines.push(vec![*k]);
@@ -156,6 +209,8 @@ pub fn layout_frame(tx: &mut Tx, id: NodeId) -> bool {
             }
         }
     }
+    rect.w = n.layout_child.constrain(0, rect.w);
+    rect.h = n.layout_child.constrain(1, rect.h);
     if rect != n.rect {
         tx.node_mut(id).unwrap().rect = rect;
     }
@@ -171,7 +226,7 @@ pub fn layout_frame(tx: &mut Tx, id: NodeId) -> bool {
 
 fn arrange(tx: &mut Tx, id: NodeId, l: &AutoLayout, rect: Rect, ma: usize, ca: usize) {
     let kids = flow_children(tx.doc(), id);
-    let pad = l.padding; // t r b l
+    let pad = padding(tx.doc().get(id).unwrap(), l); // t r b l
     let (p0m, p1m) = if ma == 0 {
         (pad[3], pad[1])
     } else {
@@ -197,14 +252,32 @@ fn arrange(tx: &mut Tx, id: NodeId, l: &AutoLayout, rect: Rect, ma: usize, ca: u
             .iter()
             .map(|k| {
                 let kn = tx.doc().get(*k).unwrap();
-                match kn.layout_child.sizing[ma] {
-                    Sizing::Fill => 0.0,
+                let lc = &kn.layout_child;
+                match (lc.aspect, ma, lc.sizing[ma]) {
+                    // Column: the height follows the (possibly stretched) width.
+                    (Some(ar), 1, s) if s != Sizing::Fill => {
+                        let (cb, ce) = margins(&lc.margin, ca);
+                        let w = match lc.sizing[ca] {
+                            Sizing::Fill if !l.wrap => inner_c - cb - ce,
+                            _ => kn.rect.w,
+                        };
+                        lc.constrain(1, w.max(0.0) / ar)
+                    }
+                    (_, _, Sizing::Fill) => 0.0,
                     _ => get(&kn.rect, ma).1,
                 }
             })
             .collect();
         let gap = if l.gap_auto { 0.0 } else { l.gap };
-        let fixed: f64 = sizes.iter().sum::<f64>() + gap * line.len().saturating_sub(1) as f64;
+        let margin_total: f64 = line
+            .iter()
+            .map(|k| {
+                let m = margins(&tx.doc().get(*k).unwrap().layout_child.margin, ma);
+                m.0 + m.1
+            })
+            .sum();
+        let fixed: f64 =
+            sizes.iter().sum::<f64>() + margin_total + gap * line.len().saturating_sub(1) as f64;
         let fills: Vec<usize> = (0..line.len())
             .filter(|i| tx.doc().get(line[*i]).unwrap().layout_child.sizing[ma] == Sizing::Fill)
             .collect();
@@ -214,12 +287,61 @@ fn arrange(tx: &mut Tx, id: NodeId, l: &AutoLayout, rect: Rect, ma: usize, ca: u
                 sizes[*i] = share;
             }
         }
-        let used: f64 = sizes.iter().sum::<f64>() + gap * line.len().saturating_sub(1) as f64;
+        if l.columns > 0 {
+            // Grid: every cell gets one equal track, whatever its own size.
+            let cols = l.columns as f64;
+            let track = ((inner_m - gap * (cols - 1.0)) / cols).max(0.0);
+            sizes.iter_mut().for_each(|s| *s = track);
+        }
+        for (i, k) in line.iter().enumerate() {
+            sizes[i] = tx
+                .doc()
+                .get(*k)
+                .unwrap()
+                .layout_child
+                .constrain(ma, sizes[i]);
+        }
+        // CSS flex-shrink: overflow-hidden text has min-width 0, so it gives up width
+        // when the line overflows (an ellipsis cell in a table row).
+        let clips = |k: &NodeId| ma == 0 && tx.doc().get(*k).is_some_and(clips_text);
+        let over =
+            sizes.iter().sum::<f64>() + margin_total + gap * line.len().saturating_sub(1) as f64
+                - inner_m;
+        let shrinkable: f64 = (0..line.len())
+            .filter(|i| clips(&line[*i]))
+            .map(|i| sizes[i])
+            .sum();
+        if !l.wrap && over > 1e-9 && shrinkable > 1e-9 {
+            for (i, k) in line.iter().enumerate() {
+                if clips(k) {
+                    let s = (sizes[i] - over * sizes[i] / shrinkable).max(0.0);
+                    sizes[i] = tx.doc().get(*k).unwrap().layout_child.constrain(ma, s);
+                }
+            }
+        }
+        let used: f64 =
+            sizes.iter().sum::<f64>() + margin_total + gap * line.len().saturating_sub(1) as f64;
         let free = inner_m - used;
-        let (mut cursor, gap) = if l.gap_auto && line.len() > 1 {
+        // Auto margins on the main axis take all free space (before justify-content does).
+        let auto_count: usize = line
+            .iter()
+            .map(|k| {
+                let (b, e) = autos(&tx.doc().get(*k).unwrap().layout_child, ma);
+                b as usize + e as usize
+            })
+            .sum();
+        let auto_share = if auto_count > 0 && free > 0.0 {
+            free / auto_count as f64
+        } else {
+            0.0
+        };
+        let (mut cursor, gap) = if auto_count > 0 {
+            (p0m, gap)
+        } else if l.gap_auto && line.len() > 1 {
             (
                 p0m,
-                ((inner_m - sizes.iter().sum::<f64>()) / (line.len() - 1) as f64).max(0.0),
+                ((inner_m - sizes.iter().sum::<f64>() - margin_total) / (line.len() - 1) as f64)
+                    .max(0.0),
             )
         } else {
             let start = match l.align_main {
@@ -231,7 +353,16 @@ fn arrange(tx: &mut Tx, id: NodeId, l: &AutoLayout, rect: Rect, ma: usize, ca: u
         };
         let line_cross = if l.wrap {
             line.iter()
-                .map(|k| get(&tx.doc().get(*k).unwrap().rect, ca).1)
+                .map(|k| {
+                    let n = tx.doc().get(*k).unwrap();
+                    let m = margins(&n.layout_child.margin, ca);
+                    // A stretched item's own size would feed back into the line; use its content.
+                    let s = match n.layout_child.sizing[ca] {
+                        Sizing::Fill => hug_size(tx.doc(), *k, ca),
+                        _ => get(&n.rect, ca).1,
+                    };
+                    s + m.0 + m.1
+                })
                 .fold(0.0, f64::max)
         } else {
             inner_c
@@ -239,18 +370,45 @@ fn arrange(tx: &mut Tx, id: NodeId, l: &AutoLayout, rect: Rect, ma: usize, ca: u
         for (i, k) in line.iter().enumerate() {
             let kn = tx.doc().get(*k).unwrap();
             let mut r = kn.rect;
-            let cs = match kn.layout_child.sizing[ca] {
-                Sizing::Fill => line_cross.max(0.0),
-                _ => get(&r, ca).1,
+            let (mb, me) = margins(&kn.layout_child.margin, ma);
+            let (cb, ce) = margins(&kn.layout_child.margin, ca);
+            let cs = kn.layout_child.constrain(
+                ca,
+                match kn.layout_child.sizing[ca] {
+                    // Row: the height follows the width this line gave it.
+                    _ if ma == 0 && kn.layout_child.aspect.is_some() => {
+                        sizes[i] / kn.layout_child.aspect.unwrap()
+                    }
+                    Sizing::Fill => (line_cross - cb - ce).max(0.0),
+                    // Overflow-hidden text never pokes out of its cross axis either.
+                    _ if ca == 0 && clips_text(kn) => {
+                        get(&r, ca).1.min((line_cross - cb - ce).max(0.0))
+                    }
+                    _ => get(&r, ca).1,
+                },
+            );
+            let align = match autos(&kn.layout_child, ca) {
+                (true, true) => Align::Center,
+                (true, false) => Align::End,
+                (false, true) => Align::Start,
+                _ => kn.layout_child.align_self.unwrap_or(l.align_cross),
             };
-            let cpos = match l.align_cross {
-                Align::Start => cross_cursor,
-                Align::Center => cross_cursor + (line_cross - cs) * 0.5,
-                Align::End => cross_cursor + line_cross - cs,
+            let cpos = match align {
+                Align::Start => cross_cursor + cb,
+                Align::Center => cross_cursor + cb + (line_cross - cb - ce - cs) * 0.5,
+                Align::End => cross_cursor + line_cross - ce - cs,
             };
+            let (auto_b, auto_e) = autos(&kn.layout_child, ma);
+            let (mb, me) = (
+                mb + if auto_b { auto_share } else { 0.0 },
+                me + if auto_e { auto_share } else { 0.0 },
+            );
+            cursor += mb;
             set(&mut r, ma, cursor, sizes[i]);
             set(&mut r, ca, cpos, cs);
-            cursor += sizes[i] + gap;
+            r.x += kn.layout_child.offset[0];
+            r.y += kn.layout_child.offset[1];
+            cursor += sizes[i] + me + gap;
             if r != kn.rect {
                 let resized = (r.w - kn.rect.w).abs() > 1e-9 || (r.h - kn.rect.h).abs() > 1e-9;
                 let old = kn.rect;
@@ -259,6 +417,13 @@ fn arrange(tx: &mut Tx, id: NodeId, l: &AutoLayout, rect: Rect, ma: usize, ca: u
                     n.set_rect_scaling(r);
                 } else {
                     n.rect = r;
+                }
+                // Layout set this text's width; keep it so the text wraps or clips there.
+                // ponytail: the width sticks if the row later widens; remeasure intrinsic width if that matters.
+                if (r.w - old.w).abs() > 1e-9
+                    && let NodeKind::Text { auto_width, .. } = &mut n.kind
+                {
+                    *auto_width = false;
                 }
                 if resized {
                     resize_children(tx, *k, old, r);
@@ -281,15 +446,20 @@ fn arrange(tx: &mut Tx, id: NodeId, l: &AutoLayout, rect: Rect, ma: usize, ca: u
 }
 
 /// Re-measure a text node's height after its width changed.
+fn clips_text(n: &crate::model::Node) -> bool {
+    matches!(n.kind, NodeKind::Text { .. }) && n.text_style.overflow_hidden
+}
+
 pub fn fit_text_height(tx: &mut Tx, id: NodeId) {
     let Some(n) = tx.doc().get(id) else { return };
     if !matches!(n.kind, NodeKind::Text { .. }) {
         return;
     }
-    if let Some(l) = crate::text::layout_node(n)
-        && (l.height - n.rect.h).abs() > 1e-9
-    {
-        tx.node_mut(id).unwrap().rect.h = l.height;
+    if let Some(l) = crate::text::layout_node(n) {
+        let h = n.layout_child.constrain(1, l.height.ceil());
+        if (h - n.rect.h).abs() > 1e-9 {
+            tx.node_mut(id).unwrap().rect.h = h;
+        }
     }
 }
 

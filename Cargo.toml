@@ -62,3 +62,7 @@ objc2 = "0.6"
 objc2-app-kit = "0.3"
 objc2-foundation = "0.3"
 raw-window-handle = "0.6"
+
+[patch.crates-io]
+# 0.30 backport for native Wayland touchpad pinch; keep the commit pinned.
+winit = { git = "https://github.com/abelkm99/winit", rev = "0c36f24f21ed8283a72cdfa2f4cc41dd114a4c80" }

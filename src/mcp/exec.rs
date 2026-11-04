@@ -20,7 +20,7 @@ use crate::project::{Project, Store};
 use crate::render::gpu::Headless;
 use crate::session::Session;
 use serde_json::{Map, Value, json};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -280,6 +280,9 @@ pub fn call(host: &mut dyn Host, name: &str, args: &Value) -> ToolResult {
                 "rename_nodes" => rename_nodes(ed, &a),
                 "delete_nodes" => delete_nodes(ed, &a),
                 "duplicate_nodes" => duplicate_nodes(ed, &a),
+                "create_component" => create_component(ed, &a),
+                "create_instance" => create_instance(ed, &a),
+                "set_instance_overrides" => set_instance_overrides(ed, &a),
                 "move_nodes" => move_nodes(ed, &a),
                 "select_nodes" => select_nodes(ed, &a),
                 "undo" | "redo" => undo_redo(ed, &a, name == "undo"),
@@ -551,6 +554,9 @@ fn node_info(ed: &mut Editor, a: &Args) -> ToolResult {
         v["instance"] = json!(true);
     }
     v["autoLayout"] = json!(n.layout.is_some());
+    let wr = doc.world_rect(id).unwrap_or(n.rect);
+    let b = crate::render::draw::turned(doc, id, crate::render::draw::draw_bounds(n, wr));
+    v["drawnBounds"] = json!({"x": r2(b.x), "y": r2(b.y), "width": r2(b.w), "height": r2(b.h)});
     text(v)
 }
 
@@ -751,6 +757,14 @@ pub fn glob(pattern: &str, s: &str) -> bool {
     true
 }
 
+fn text_matches(query: &str, value: &str) -> bool {
+    if query.contains('*') {
+        glob(query, value)
+    } else {
+        value.to_lowercase().contains(&query.to_lowercase())
+    }
+}
+
 fn value_matches(want: &str, got: &str) -> Option<String> {
     if glob(want, got) {
         return Some(got.to_string());
@@ -775,7 +789,7 @@ fn find_nodes(ed: &mut Editor, a: &Args) -> ToolResult {
             scope.push((p, ed.page_doc(p).paint_order()));
         }
     }
-    let text_q = a.str("textValue");
+    let text_q = a.str("textValue").or_else(|| a.str("query"));
     let filters: Vec<(String, String)> = a
         .get("filters")
         .and_then(Value::as_array)
@@ -790,7 +804,7 @@ fn find_nodes(ed: &mut Editor, a: &Args) -> ToolResult {
         })
         .unwrap_or_default();
     if text_q.is_none() && filters.is_empty() {
-        return Err("pass textValue and/or filters".into());
+        return Err("pass textValue, query and/or filters".into());
     }
     let mut results = Vec::new();
     for (page, ids) in scope {
@@ -800,7 +814,7 @@ fn find_nodes(ed: &mut Editor, a: &Args) -> ToolResult {
             let mut matched = Vec::new();
             if let Some(q) = text_q {
                 match n.kind.text() {
-                    Some(t) if glob(q, t) => matched.push(json!({"textValue": t})),
+                    Some(t) if text_matches(q, t) => matched.push(json!({"textValue": t})),
                     _ => continue,
                 }
             }
@@ -841,18 +855,24 @@ fn font_info(a: &Args) -> ToolResult {
         .iter()
         .map(|f| {
             let inter = f.trim().eq_ignore_ascii_case("inter");
+            let mono = f.trim().eq_ignore_ascii_case("monospace")
+                || f.trim().eq_ignore_ascii_case("noto sans mono");
             json!({
                 "family": f,
-                "available": inter,
+                "available": inter || mono,
                 "styles": if inter { json!([
-                    {"weight": 400, "style": "normal"}, {"weight": 700, "style": "normal"},
-                    {"weight": 400, "style": "italic"}, {"weight": 700, "style": "italic"}]) } else { json!([]) },
-                "note": if inter { "" } else { "not available; text renders in Inter" },
+                    {"weight": 400, "style": "normal"}, {"weight": 500, "style": "normal"},
+                    {"weight": 600, "style": "normal"}, {"weight": 700, "style": "normal"},
+                    {"weight": 400, "style": "italic"}, {"weight": 700, "style": "italic"}]) }
+                    else if mono { json!([
+                        {"weight": 400, "style": "normal"}, {"weight": 700, "style": "normal"}]) }
+                    else { json!([]) },
+                "note": if inter || mono { "" } else { "not available; text renders in Inter" },
             })
         })
         .collect();
     text(
-        json!({"families": fams, "weights": "fontWeight ≥ 600 renders bold, below renders regular"}),
+        json!({"families": fams, "weights": "Bundled Inter 400/500/600/700 (italic: 400/700); other weights use the nearest available face"}),
     )
 }
 
@@ -1180,16 +1200,38 @@ fn fit_text(tx: &mut Tx, id: NodeId, keep_height: bool) {
     let Some(l) = crate::text::layout_node(n) else {
         return;
     };
-    let w = if auto_width {
-        l.width.max(1.0)
+    let w = n.layout_child.constrain(
+        0,
+        if auto_width {
+            l.width.max(1.0)
+        } else {
+            n.rect.w
+        },
+    );
+    // An intrinsic text line capped by max-width needs a fixed width to wrap on remeasure.
+    let capped = auto_width && w < l.width - 1e-9;
+    let h = if keep_height {
+        n.rect.h
+    } else if capped {
+        let mut measured = n.clone();
+        measured.rect.w = w;
+        if let NodeKind::Text { auto_width, .. } = &mut measured.kind {
+            *auto_width = false;
+        }
+        crate::text::layout_node(&measured).map_or(l.height, |m| m.height)
     } else {
-        n.rect.w
+        l.height
     };
-    let h = if keep_height { n.rect.h } else { l.height };
+    let h = n
+        .layout_child
+        .constrain(1, if keep_height { h } else { h.ceil() });
     if (n.rect.w - w).abs() > 1e-9 || (n.rect.h - h).abs() > 1e-9 {
         let n = tx.node_mut(id).unwrap();
         n.rect.w = w;
         n.rect.h = h;
+        if capped && let NodeKind::Text { auto_width, .. } = &mut n.kind {
+            *auto_width = false;
+        }
     }
 }
 
@@ -1226,6 +1268,7 @@ struct Parent {
     definite: [bool; 2],
     /// Children without an explicit cross size stretch (CSS `align-items: normal`).
     stretch: bool,
+    variables: BTreeMap<String, String>,
 }
 
 impl Parent {
@@ -1237,6 +1280,7 @@ impl Parent {
                 size: None,
                 definite: [false; 2],
                 stretch: false,
+                variables: BTreeMap::new(),
             },
             Some(n) => Parent {
                 id: Some(n.id),
@@ -1247,6 +1291,7 @@ impl Parent {
                     n.layout_child.sizing[1] != Sizing::Hug,
                 ],
                 stretch: stretches(page_id, n),
+                variables: n.style.variables.clone(),
             },
         }
     }
@@ -1358,6 +1403,13 @@ const INHERITED: &[&str] = &[
     "fontFamily",
     "whiteSpace",
     "textDecoration",
+    "textDecorationColor",
+    "textDecorationStyle",
+    "textTransform",
+    "fontVariantNumeric",
+    "lineClamp",
+    "webkitLineClamp",
+    "WebkitLineClamp",
 ];
 
 fn get<'s>(st: &'s Styles, k: &str) -> Option<&'s str> {
@@ -1374,7 +1426,7 @@ fn inherit(parent: &Styles, own: &Styles) -> Styles {
         .unwrap_or(16.0);
     let mut out: Styles = parent.clone();
     for (k, v) in own {
-        if INHERITED.contains(&k.as_str()) {
+        if INHERITED.contains(&k.as_str()) || k.starts_with("--") {
             let v = if k == "fontSize" {
                 css::length(v, pfs).map_or(v.clone(), |px| format!("{px}px"))
             } else {
@@ -1405,7 +1457,7 @@ fn text_only(el: &Element) -> bool {
 }
 
 fn is_flex(st: &Styles) -> bool {
-    get(st, "display").is_some_and(|d| d.contains("flex"))
+    get(st, "display").is_some_and(|d| d.contains("flex") || d.contains("grid"))
 }
 
 fn has_element_children(el: &Element) -> bool {
@@ -1454,6 +1506,29 @@ fn collect_runs(nodes: &[Html], run: Run, base_fs: f64, out: &mut Vec<(char, Run
             }
         }
     }
+}
+
+fn apply_runs(ts: &mut crate::model::TextStyle, chars: &[(char, Run)]) {
+    let mut i = 0;
+    while i < chars.len() {
+        let r = chars[i].1;
+        let mut j = i + 1;
+        while j < chars.len() && chars[j].1 == r {
+            j += 1;
+        }
+        if r != Run::default() {
+            ts.apply_range(i, j, |s| {
+                s.bold = r.bold;
+                s.italic = r.italic;
+                s.underline = r.underline;
+                s.strike = r.strike;
+                s.color = r.color;
+                s.size = r.size;
+            });
+        }
+        i = j;
+    }
+    ts.normalize();
 }
 
 /// Collapse whitespace like CSS `white-space: normal` (hard breaks from `<br>` survive).
@@ -1518,21 +1593,25 @@ impl Builder<'_, '_> {
         }
     }
 
-    /// Default sizing before explicit styles: stretch on the cross axis when the parent's
-    /// size there is definite.
+    /// Default CSS cross-axis stretch, even when the parent hugs its content.
+    /// For a hug-sized parent, leave the child's intrinsic width available until
+    /// layout measures it; the parent then stretches the child to the line width.
     fn stretch_default(parent: &Parent, n: &mut Node, styles: &Styles) {
         let Some(ca) = parent.cross() else { return };
         let explicit = get(styles, if ca == 0 { "width" } else { "height" }).is_some()
             || get(styles, "alignSelf").is_some_and(|v| v != "stretch")
             || matches!(get(styles, "position"), Some("absolute" | "fixed"));
-        if parent.stretch && parent.definite[ca] && !explicit {
+        if parent.stretch && !explicit {
             n.layout_child.sizing[ca] = Sizing::Fill;
-            if ca == 0
+            if parent.definite[ca]
+                && ca == 0
                 && let NodeKind::Text { auto_width, .. } = &mut n.kind
             {
                 *auto_width = false;
             }
-            if let Some(ps) = parent.size {
+            if parent.definite[ca]
+                && let Some(ps) = parent.size
+            {
                 let pad = parent.layout.map_or([0.0; 4], |l| l.padding);
                 if ca == 0 {
                     n.rect.w = (ps.0 - pad[1] - pad[3]).max(1.0);
@@ -1625,7 +1704,7 @@ impl Builder<'_, '_> {
                     k.starts_with("background")
                         || k.starts_with("border") && v != "none" && v != "0"
                         || k.starts_with("padding")
-                        || k == "display" && v.contains("flex")
+                        || k == "display" && (v.contains("flex") || v.contains("grid"))
                 }) || matches!(el.tag.as_str(), "button" | "li" | "a")
                     && own.iter().any(|(k, _)| k.starts_with("padding"));
                 if boxy {
@@ -1641,11 +1720,18 @@ impl Builder<'_, '_> {
     }
 
     fn layer_name(el: &Element) -> Option<String> {
-        el.attr("layer-name")
+        if let Some(name) = el
+            .attr("layer-name")
             .or_else(|| el.attr("data-name"))
             .or_else(|| el.attr("aria-label"))
             .or_else(|| el.attr("id"))
-            .map(|s| s.chars().take(50).collect())
+        {
+            return Some(name.chars().take(50).collect());
+        }
+        el.attr("class")
+            .and_then(|c| c.split_whitespace().next())
+            .or_else(|| el.attr("role"))
+            .map(|label| format!("{}.{}", el.tag, label).chars().take(50).collect())
     }
 
     /// A text layer for an element whose content is inline only.
@@ -1682,6 +1768,7 @@ impl Builder<'_, '_> {
         );
         n.id = self.tx.alloc_id();
         n.style.set_fill(Some(Color::BLACK));
+        n.style.variables = parent.variables.clone();
         n.name = Self::layer_name(el).unwrap_or_else(|| {
             content
                 .lines()
@@ -1695,38 +1782,7 @@ impl Builder<'_, '_> {
         let a = css::apply(&mut n, &styles, &parent.ctx());
         self.note(&a);
         // Rich text runs.
-        let mut i = 0;
-        while i < chars.len() {
-            let r = chars[i].1;
-            let mut j = i + 1;
-            while j < chars.len() && chars[j].1 == r {
-                j += 1;
-            }
-            if r != Run::default() {
-                n.text_style.apply_range(i, j, |s| {
-                    if r.bold.is_some() {
-                        s.bold = r.bold;
-                    }
-                    if r.italic.is_some() {
-                        s.italic = r.italic;
-                    }
-                    if r.underline.is_some() {
-                        s.underline = r.underline;
-                    }
-                    if r.strike.is_some() {
-                        s.strike = r.strike;
-                    }
-                    if r.color.is_some() {
-                        s.color = r.color;
-                    }
-                    if r.size.is_some() {
-                        s.size = r.size;
-                    }
-                });
-            }
-            i = j;
-        }
-        n.text_style.normalize();
+        apply_runs(&mut n.text_style, &chars);
         let keep_h = get(own, "height").is_some_and(|v| css::length(v, fs).is_some());
         let id = self.insert(n, parent, index);
         fit_text(self.tx, id, keep_h);
@@ -1751,15 +1807,9 @@ impl Builder<'_, '_> {
         );
         n.id = self.tx.alloc_id();
         n.style.fills.clear();
-        n.name = Self::layer_name(el).unwrap_or_else(|| match el.tag.as_str() {
-            "div" | "span" => "Frame".into(),
-            t => {
-                let mut c = t.chars();
-                c.next()
-                    .map_or("Frame".into(), |f| f.to_uppercase().chain(c).collect())
-            }
-        });
-        let flex = get(own, "display").is_some_and(|d| d.contains("flex"));
+        n.style.variables = parent.variables.clone();
+        n.name = Self::layer_name(el).unwrap_or_else(|| el.tag.clone());
+        let flex = is_flex(own);
         n.layout = Some(AutoLayout {
             direction: if flex {
                 Direction::Horizontal
@@ -1838,6 +1888,7 @@ impl Builder<'_, '_> {
         n.name = Self::layer_name(el)
             .or_else(|| el.attr("alt").map(String::from))
             .unwrap_or_else(|| "Image".into());
+        n.style.variables = parent.variables.clone();
         n.style.fills = match &asset {
             Some(a) => vec![Paint::Image {
                 asset: a.clone(),
@@ -2182,8 +2233,22 @@ fn write_html(ed: &mut Editor, a: &Args) -> ToolResult {
     if created.is_empty() && !warnings.is_empty() {
         return Err(warnings.join("; "));
     }
+    let doc = ed.page_doc(page);
+    let all: Vec<Value> = created
+        .iter()
+        .flat_map(|id| doc.subtree(*id))
+        .map(|id| {
+            let n = doc.get(id).unwrap();
+            json!({
+                "id": node_key(ed, page, id),
+                "name": n.name,
+                "parent": n.parent.map_or(ROOT.to_string(), |p| node_key(ed, page, p)),
+            })
+        })
+        .collect();
     let mut v = json!({
         "createdNodeIds": created.iter().map(|id| node_key(ed, page, *id)).collect::<Vec<_>>(),
+        "created": all,
         "pageId": ed.pages[page].id,
     });
     if let Some(t) = target {
@@ -2459,6 +2524,7 @@ fn batch<T: Clone>(
     key: &str,
     label: &str,
     parse: impl Fn(&Args) -> Result<T, String>,
+    validate: impl Fn(&Node) -> Result<(), String>,
     mut f: impl FnMut(&mut Tx, NodeId, &T) -> Result<(), String>,
 ) -> Result<usize, String> {
     let def = page_arg(ed, a)?;
@@ -2467,6 +2533,10 @@ fn batch<T: Clone>(
         let u = Args(u.as_object().ok_or("each update must be an object")?);
         let (page, id) = resolve(ed, u.req_str("nodeId")?, def)?;
         let v = parse(&u)?;
+        // Validate every entry before starting any page's edit. Tx is not rolled back
+        // when an edit closure returns Err, so a mid-batch failure would half-apply.
+        validate(ed.page_doc(page).get(id).unwrap())
+            .map_err(|e| format!("{}: {e}", node_key(ed, page, id)))?;
         match by_page.iter_mut().find(|(p, _)| *p == page) {
             Some((_, list)) => list.push((id, v)),
             None => by_page.push((page, vec![(id, v)])),
@@ -2488,36 +2558,48 @@ fn batch<T: Clone>(
 }
 
 fn set_text_content(ed: &mut Editor, a: &Args) -> ToolResult {
+    #[derive(Clone)]
+    enum Change {
+        Plain(String),
+        Html(Vec<Html>),
+    }
     let n = batch(
         ed,
         a,
         "updates",
         "Set text",
-        |u| {
-            Ok(u.get("textContent")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string())
+        // html wins over textContent: clients with the older schema must still send textContent.
+        |u| match (u.get("textContent"), u.get("html")) {
+            (_, Some(Value::String(s))) => Ok(Change::Html(html::parse(s))),
+            (Some(Value::String(t)), None) => Ok(Change::Plain(t.clone())),
+            _ => Err("pass textContent or html (as a string)".into()),
         },
-        |tx, id, t| {
-            let node = tx.node_mut(id).unwrap();
-            let old_len = node.kind.text().map(|s| s.chars().count()).ok_or_else(|| {
+        |node| {
+            node.kind.text().map(|_| ()).ok_or_else(|| {
                 format!(
                     "{} is a {}, not a text layer",
                     node.name,
                     node.kind.type_name()
                 )
-            })?;
-            *node.kind.text_mut().unwrap() = t.clone();
-            let len = t.chars().count();
-            for s in &mut node.text_style.spans {
-                if s.start == 0 && s.end >= old_len {
-                    s.end = len;
+            })
+        },
+        |tx, id, change| {
+            let (content, runs) = match change {
+                Change::Plain(t) => (t.clone(), None),
+                Change::Html(nodes) => {
+                    let fs = tx.doc().get(id).unwrap().kind.font_size().unwrap_or(16.0);
+                    let mut chars = Vec::new();
+                    collect_runs(nodes, Run::default(), fs, &mut chars);
+                    let chars = collapse(chars, false);
+                    (chars.iter().map(|(c, _)| *c).collect(), Some(chars))
                 }
-                s.start = s.start.min(len);
-                s.end = s.end.min(len);
+            };
+            let node = tx.node_mut(id).unwrap();
+            *node.kind.text_mut().unwrap() = node.text_style.case.apply(&content);
+            node.text_style.spans.clear();
+            if let Some(chars) = runs {
+                apply_runs(&mut node.text_style, &chars);
             }
-            node.text_style.spans.retain(|s| s.end > s.start);
             fit_text(tx, id, false);
             relayout(tx, Some(id));
             Ok(())
@@ -2533,6 +2615,7 @@ fn rename_nodes(ed: &mut Editor, a: &Args) -> ToolResult {
         "updates",
         "Rename",
         |u| Ok(u.req_str("name")?.chars().take(50).collect::<String>()),
+        |_| Ok(()),
         |tx, id, name| {
             tx.node_mut(id).unwrap().name = name.clone();
             Ok(())
@@ -2576,6 +2659,95 @@ fn delete_nodes(ed: &mut Editor, a: &Args) -> ToolResult {
         v["notFound"] = json!(missing);
     }
     text(v)
+}
+
+fn create_component(ed: &mut Editor, a: &Args) -> ToolResult {
+    let (page, id) = resolve(ed, a.req_str("nodeId")?, page_arg(ed, a)?)?;
+    let n = ed.page_doc(page).get(id).unwrap();
+    if !n.is_frame() || n.instance.is_some() {
+        return Err("nodeId must be a frame that is not already an instance".into());
+    }
+    if !n.component {
+        ed.with_page(page, |ed| {
+            ed.edit("Create component", |tx| {
+                tx.node_mut(id).unwrap().component = true;
+            })
+        });
+    }
+    text(json!({"componentId": node_key(ed, page, id)}))
+}
+
+fn create_instance(ed: &mut Editor, a: &Args) -> ToolResult {
+    let (page, main) = resolve(ed, a.req_str("componentId")?, page_arg(ed, a)?)?;
+    if !ed.page_doc(page).get(main).unwrap().component {
+        return Err("componentId must refer to a main component".into());
+    }
+    let parent = match a.str("parentId") {
+        None | Some(ROOT) => None,
+        Some(k) => {
+            let (p, id) = resolve(ed, k, page)?;
+            if p != page {
+                return Err("instances must be on the same page as their component".into());
+            }
+            if !ed.page_doc(page).get(id).unwrap().is_container() {
+                return Err("parentId must be a frame or group".into());
+            }
+            if id == main || ed.page_doc(page).is_ancestor(main, id) {
+                return Err("cannot put an instance inside its own main component".into());
+            }
+            Some(id)
+        }
+    };
+    let at = if parent.is_none() {
+        free_spot(
+            ed.page_doc(page),
+            ed.page_doc(page).get(main).unwrap().rect.w,
+        )
+    } else {
+        V2::ZERO
+    };
+    let at = v2(a.num("x").unwrap_or(at.x), a.num("y").unwrap_or(at.y));
+    let id = ed
+        .with_page(page, |ed| ed.create_instance_under(main, parent, at))
+        .ok_or("cannot create an instance of this component")?;
+    let doc = ed.page_doc(page);
+    let created: Vec<Value> = doc
+        .subtree(id)
+        .iter()
+        .map(|i| {
+            let n = doc.get(*i).unwrap();
+            json!({"id": node_key(ed, page, *i), "name": n.name,
+               "parent": n.parent.map_or(ROOT.into(), |p| node_key(ed, page, p)),
+               "mainId": node_key(ed, page, n.instance.as_ref().unwrap().main)})
+        })
+        .collect();
+    text(json!({"instanceId": node_key(ed, page, id), "created": created}))
+}
+
+fn set_instance_overrides(ed: &mut Editor, a: &Args) -> ToolResult {
+    let (page, id) = resolve(ed, a.req_str("nodeId")?, page_arg(ed, a)?)?;
+    let text_value = a.req_str("text")?.to_string();
+    let n = ed.page_doc(page).get(id).unwrap();
+    if n.instance.is_none() || !matches!(n.kind, NodeKind::Text { .. }) {
+        return Err(format!(
+            "{} must be a text layer inside an instance",
+            node_key(ed, page, id)
+        ));
+    }
+    ed.with_page(page, |ed| {
+        ed.edit("Override instance text", |tx| {
+            let n = tx.node_mut(id).unwrap();
+            *n.kind.text_mut().unwrap() = text_value;
+            n.text_style.spans.clear();
+            let link = n.instance.as_mut().unwrap();
+            if !link.overrides.iter().any(|s| s == "text") {
+                link.overrides.push("text".into());
+            }
+            fit_text(tx, id, false);
+            relayout(tx, Some(id));
+        })
+    });
+    text(json!({"updated": 1, "nodeId": node_key(ed, page, id)}))
 }
 
 fn duplicate_nodes(ed: &mut Editor, a: &Args) -> ToolResult {

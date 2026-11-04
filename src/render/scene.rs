@@ -88,6 +88,7 @@ pub struct Item {
 struct Entry {
     node: Node,
     wr: Rect,
+    xf: Option<draw::Xf>,
     opacity: f64,
     bucket: i32,
     pieces: Arc<Vec<Piece>>,
@@ -137,9 +138,11 @@ impl SceneCache {
         let all = doc.root.clone();
         for id in roots.unwrap_or(&all) {
             let op = draw::inherited_opacity(doc, *id);
-            let origin = doc.parent_origin(doc.get(*id).and_then(|n| n.parent));
+            let parent = doc.get(*id).and_then(|n| n.parent);
+            let origin = doc.parent_origin(parent);
+            let xf = parent.and_then(|p| draw::world_xf(doc, p));
             self.walk(
-                doc, *id, origin, None, op, bucket, &mut tess, cull, &mut out,
+                doc, *id, origin, xf, None, op, bucket, &mut tess, cull, &mut out,
             );
         }
         // Evict entries for deleted or long-unseen nodes when the cache grows large.
@@ -156,6 +159,7 @@ impl SceneCache {
         doc: &Document,
         id: NodeId,
         origin: V2,
+        xf: Option<draw::Xf>,
         clip: Option<Rect>,
         parent_opacity: f64,
         bucket: i32,
@@ -169,22 +173,32 @@ impl SceneCache {
         }
         let wr = n.rect.translate(origin);
         let opacity = parent_opacity * n.style.opacity;
-        let bounds = draw::draw_bounds(n, wr);
+        let xf = draw::node_xf(n, wr, xf);
+        let turn = |r: Rect| xf.map_or(r, |x| x.bounds(r));
+        let bounds = turn(draw::draw_bounds(n, wr));
         let visible = cull.is_none_or(|c| c.intersects(&bounds))
             && clip.is_none_or(|c| c.intersects(&bounds));
         if visible && !n.is_group() {
             let hit = self.entries.get(&id).is_some_and(|e| {
-                e.bucket == bucket && e.wr == wr && e.opacity == opacity && e.node == *n
+                e.bucket == bucket
+                    && e.wr == wr
+                    && e.xf == xf
+                    && e.opacity == opacity
+                    && e.node == *n
             });
             if !hit {
                 self.last_misses += 1;
-                let d = draw::node_draw(n, wr, opacity);
+                let mut d = draw::node_draw(n, wr, opacity);
+                if let Some(x) = &xf {
+                    d.ops = draw::transform_ops(d.ops, x);
+                }
                 let pieces = Arc::new(tess.ops(&d.ops));
                 self.entries.insert(
                     id,
                     Entry {
                         node: n.clone(),
                         wr,
+                        xf,
                         opacity,
                         bucket,
                         pieces,
@@ -208,7 +222,9 @@ impl SceneCache {
         }
         let child_clip = match n.kind {
             NodeKind::Frame { clip: true } => {
-                match clip.map_or(Some(wr), |c| c.intersection(&wr)) {
+                // ponytail: a turned clip frame clips to its upright bounds (scissor rects).
+                let cr = turn(wr);
+                match clip.map_or(Some(cr), |c| c.intersection(&cr)) {
                     Some(c) => Some(c),
                     None => return,
                 }
@@ -216,13 +232,13 @@ impl SceneCache {
             _ => clip,
         };
         if matches!(n.kind, NodeKind::Frame { clip: true })
-            && cull.is_some_and(|c| !c.intersects(&wr))
+            && cull.is_some_and(|c| !c.intersects(&turn(wr)))
         {
             return;
         }
-        let o = wr.min();
+        let o = wr.min() - n.scroll_offset;
         for c in &n.children {
-            self.walk(doc, *c, o, child_clip, opacity, bucket, tess, cull, out);
+            self.walk(doc, *c, o, xf, child_clip, opacity, bucket, tess, cull, out);
         }
     }
 }

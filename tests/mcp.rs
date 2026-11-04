@@ -89,13 +89,13 @@ fn artboard_and_html_become_auto_layout_frames_and_text() {
     assert_eq!((text.as_str(), *font_size), ("Welcome back", 32.0));
     assert!(title.text_style.bold);
     assert_eq!(title.style.fill(), Some(Color::rgb(0x11, 0x11, 0x11)));
-    // Text fills the card's inner width and sits inside its padding.
+    // Text fills the card's inner width and sits inside its 1px border and padding.
     assert!(
-        (title.rect.w - (342.0 - 32.0)).abs() < 0.5,
+        (title.rect.w - (342.0 - 34.0)).abs() < 0.5,
         "{:?}",
         title.rect
     );
-    assert_eq!((title.rect.x, title.rect.y), (16.0, 16.0));
+    assert_eq!((title.rect.x, title.rect.y), (17.0, 17.0));
 
     let body = doc.get(c.children[1]).unwrap();
     let NodeKind::Text { text, .. } = &body.kind else {
@@ -128,14 +128,70 @@ fn artboard_and_html_become_auto_layout_frames_and_text() {
         button.rect
     );
 
-    // The card hugs its content: padding + three children + two gaps.
-    let want = 16.0 + title.rect.h + 8.0 + body.rect.h + 8.0 + 44.0 + 16.0;
+    // The card hugs its content: border + padding + three children + two gaps.
+    let want = 2.0 + 16.0 + title.rect.h + 8.0 + body.rect.h + 8.0 + 44.0 + 16.0;
     assert!((c.rect.h - want).abs() < 0.5, "{} vs {want}", c.rect.h);
 
     // One undo step removes the whole write.
     let before = h.ed.doc.nodes.len();
     call(&mut h, "undo", json!({}));
     assert_eq!(h.ed.doc.nodes.len(), 1, "{before} nodes before undo");
+}
+
+#[test]
+fn hug_sized_flex_containers_stretch_unsized_children() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Desktop", "styles": {"width": 400, "height": 400}}),
+    );
+    let result = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+               "html": r#"
+                 <div layer-name="Row" style="display:flex; width:fit-content; height:fit-content">
+                   <span>Label</span><div layer-name="VerticalRule" style="width:3px;background:#111"></div>
+                 </div>
+                 <div layer-name="Column" style="display:flex; flex-direction:column; width:fit-content">
+                   <span>Long label</span><div layer-name="Underline" style="height:2px;background:#111"></div>
+                 </div>
+                 <div layer-name="NoStretch" style="display:flex; flex-direction:column; width:fit-content; align-items:flex-start">
+                   <span>Long label</span><div layer-name="NoStretchRule" style="height:2px;background:#111"></div>
+                 </div>"#}),
+    );
+    let roots = result["createdNodeIds"].as_array().unwrap();
+    let row = h.ed.doc.get(num(&roots[0])).unwrap();
+    let row_label = h.ed.doc.get(row.children[0]).unwrap();
+    let vertical = h.ed.doc.get(row.children[1]).unwrap();
+    assert!(row.rect.h > 0.0);
+    assert_eq!(
+        vertical.rect.h, row_label.rect.h,
+        "a rule in a hug-height row should stretch"
+    );
+    assert_eq!(vertical.rect.w, 3.0);
+
+    let column = h.ed.doc.get(num(&roots[1])).unwrap();
+    let column_label = h.ed.doc.get(column.children[0]).unwrap();
+    let underline = h.ed.doc.get(column.children[1]).unwrap();
+    assert!(
+        column_label.rect.w > 0.0,
+        "text must contribute its intrinsic width"
+    );
+    assert_eq!(column.rect.w, column_label.rect.w);
+    assert_eq!(
+        underline.rect.w, column.rect.w,
+        "a rule in a hug-width column should stretch"
+    );
+    assert_eq!(underline.rect.h, 2.0);
+
+    let no_stretch = h.ed.doc.get(num(&roots[2])).unwrap();
+    let no_stretch_rule = h.ed.doc.get(no_stretch.children[1]).unwrap();
+    assert_eq!(
+        no_stretch_rule.rect.w, 0.0,
+        "explicit flex-start must not stretch"
+    );
 }
 
 #[test]
@@ -231,13 +287,11 @@ fn editing_tools_update_move_duplicate_and_delete() {
         json!({"updates": [{"nodeIds": [a.clone()], "styles": {"backgroundColor": "linear-gradient(90deg, red, blue)", "boxShadow": "0 1px 2px black", "sketch": true, "roughness": 2}}]}),
     );
     assert_eq!(up["updated"], 1);
-    assert_eq!(
-        up["ignoredStyles"][a.as_str().unwrap()],
-        json!(["boxShadow"])
-    );
+    assert!(up.get("ignoredStyles").is_none(), "{up}");
     let an = h.ed.doc.get(num(&a)).unwrap();
     assert!(matches!(an.style.fills[0], Paint::Linear { .. }));
     assert_eq!(an.style.rough.unwrap().roughness, 2.0);
+    assert_eq!(an.style.shadows.len(), 1);
 
     // Text edits refit the layer.
     let one = h.ed.doc.get(num(&a)).unwrap().children[0];
@@ -290,6 +344,501 @@ fn editing_tools_update_move_duplicate_and_delete() {
     );
     let new = num(&rep["createdNodeIds"][0]);
     assert_eq!(h.ed.doc.get(ab_n).unwrap().children[0], new);
+}
+
+#[test]
+fn clipping_frame_scroll_top_offsets_children_without_moving_viewport() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Scroll", "styles": {"width": 200, "height": 150}}),
+    );
+    let created = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+        "html": "<div style='width:80px;height:20px;overflow:hidden;scroll-top:20px'><div style='height:20px;background:#ff0000'></div><div style='height:20px;background:#0000ff'></div></div>"}),
+    );
+    assert!(created.get("ignoredStyles").is_none(), "{created}");
+    let id = &created["createdNodeIds"][0];
+    let frame = h.ed.doc.get(num(id)).unwrap();
+    assert_eq!(frame.scroll_offset.y, 20.0);
+    let wr = h.ed.doc.world_rect(num(id)).unwrap();
+    assert_eq!(
+        h.ed.doc.world_rect(frame.children[0]).unwrap().y,
+        wr.y - 20.0
+    );
+    assert_eq!(h.ed.doc.world_rect(frame.children[1]).unwrap().y, wr.y);
+    let styles = call(&mut h, "get_computed_styles", json!({"nodeIds": [id]}));
+    assert_eq!(styles[id.as_str().unwrap()]["scrollTop"], "20px");
+    if sketch_rs::render::gpu::Headless::new().is_ok() {
+        let out = exec::call(&mut h, "get_screenshot", &json!({"nodeId": id})).unwrap();
+        let Out::Image { data, .. } = &out[0] else {
+            panic!("expected image")
+        };
+        let img = image::load_from_memory(data).unwrap().to_rgba8();
+        let p = img.get_pixel(40, 10).0;
+        assert!(
+            p[2] > 200 && p[0] < 50,
+            "scrolled viewport should show blue child: {p:?}"
+        );
+    }
+}
+
+#[test]
+fn mcp_component_instances_and_text_overrides_follow_the_main() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Components", "styles": {"width": 330, "height": 240}}),
+    );
+    let created = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+        "html": "<div layer-name='Row' style='display:flex;gap:4px'><span>Old</span></div>"}),
+    );
+    let main = &created["createdNodeIds"][0];
+    let c = call(&mut h, "create_component", json!({"nodeId": main}));
+    assert_eq!(c["componentId"], *main);
+    assert!(
+        exec::call(
+            &mut h,
+            "create_instance",
+            &json!({"componentId": main, "parentId": main})
+        )
+        .unwrap_err()
+        .contains("own main component")
+    );
+    let made = call(
+        &mut h,
+        "create_instance",
+        json!({"componentId": main, "parentId": artboard["id"]}),
+    );
+    let inst = &made["instanceId"];
+    let inst_node = h.ed.doc.get(num(inst)).unwrap();
+    assert_eq!(inst_node.instance.as_ref().unwrap().main, num(main));
+    let inst_text = json!(exec::node_key(&h.ed, 0, inst_node.children[0]));
+    let override_result = call(
+        &mut h,
+        "set_instance_overrides",
+        json!({"nodeId": inst_text, "text": "Personal"}),
+    );
+    assert_eq!(override_result["updated"], 1);
+    let main_text = h.ed.doc.get(num(main)).unwrap().children[0];
+    let main_text_key = exec::node_key(&h.ed, 0, main_text);
+    call(
+        &mut h,
+        "set_text_content",
+        json!({"updates": [{"nodeId": main_text_key, "textContent": "New"}]}),
+    );
+    assert_eq!(h.ed.doc.get(main_text).unwrap().kind.text().unwrap(), "New");
+    assert_eq!(
+        h.ed.doc.get(num(&inst_text)).unwrap().kind.text().unwrap(),
+        "Personal"
+    );
+    assert!(
+        h.ed.doc
+            .get(num(&inst_text))
+            .unwrap()
+            .instance
+            .as_ref()
+            .unwrap()
+            .overrides
+            .contains(&"text".into())
+    );
+}
+
+#[test]
+fn css_margin_top_offsets_flex_items_and_expands_hug_size() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Margins", "styles": {"width": 200, "height": 130}}),
+    );
+    let created = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+        "html": "<div style='display:flex;flex-direction:column;width:100px;height:fit-content'><span>Label</span><div style='height:2px;margin-top:8px;background:#111'></div></div>"}),
+    );
+    assert!(created.get("ignoredStyles").is_none(), "{created}");
+    let root = h.ed.doc.get(num(&created["createdNodeIds"][0])).unwrap();
+    let (text, rule) = (
+        h.ed.doc.get(root.children[0]).unwrap(),
+        h.ed.doc.get(root.children[1]).unwrap(),
+    );
+    assert_eq!(rule.rect.y, text.rect.h + 8.0);
+    assert_eq!(root.rect.h, text.rect.h + 10.0);
+    let id = exec::node_key(&h.ed, 0, rule.id);
+    let styles = call(&mut h, "get_computed_styles", json!({"nodeIds": [id]}));
+    assert_eq!(styles[id.as_str()]["marginTop"], "8px");
+}
+
+#[test]
+fn mcp_names_elements_and_reports_visual_bounds() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Notes", "styles": {"width": 200, "height": 130}}),
+    );
+    let created = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+        "html": "<section class='card panel' style='width:80px;height:40px;border:4px solid #000'><span>Hello</span></section>"}),
+    );
+    let id = &created["createdNodeIds"][0];
+    let n = h.ed.doc.get(num(id)).unwrap();
+    assert_eq!(n.name, "section.card");
+    let info = call(&mut h, "get_node_info", json!({"nodeId": id}));
+    let wr = h.ed.doc.world_rect(num(id)).unwrap();
+    let bounds = info["drawnBounds"]
+        .as_object()
+        .expect("reported visual bounds");
+    assert_eq!(bounds["x"], wr.x);
+    assert_eq!(bounds["y"], wr.y);
+    assert_eq!(bounds["width"], wr.w);
+    assert_eq!(bounds["height"], wr.h);
+}
+
+#[test]
+fn text_height_snaps_following_dividers_to_pixel_grid() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Pixels", "styles": {"width": 220, "height": 140}}),
+    );
+    let created = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+        "html": "<div style='display:flex;flex-direction:column'><span style='font-size:13px'>Text</span><div layer-name='Divider' style='height:1px;background:#111'></div></div>"}),
+    );
+    let root = h.ed.doc.get(num(&created["createdNodeIds"][0])).unwrap();
+    let t = h.ed.doc.get(root.children[0]).unwrap();
+    let rule = h.ed.doc.get(root.children[1]).unwrap();
+    let natural = sketch_rs::text::layout_node(t).unwrap().height;
+    assert!(t.rect.h >= natural, "rounded height must not clip glyphs");
+    assert_eq!(t.rect.h.fract(), 0.0, "text box should use whole pixels");
+    assert_eq!(
+        rule.rect.y.fract(),
+        0.0,
+        "the following divider must align to a whole pixel"
+    );
+    assert_eq!(rule.rect.h, 1.0);
+}
+
+#[test]
+fn css_custom_properties_inherit_and_var_fallbacks_resolve() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Tokens", "styles": {"width": 250, "height": 200}}),
+    );
+    let created = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+        "html": "<div style='--accent:#ff0000;display:flex;flex-direction:column'><div layer-name='Inherited' style='width:40px;height:30px;background-color:var(--accent)'></div><div layer-name='Fallback' style='width:40px;height:30px;background-color:var(--missing, #3e8c7a)'></div></div>"}),
+    );
+    let root = &created["createdNodeIds"][0];
+    let children = h.ed.doc.get(num(root)).unwrap().children.clone();
+    assert_eq!(
+        h.ed.doc.get(children[0]).unwrap().style.fill(),
+        Some(Color::rgb(255, 0, 0))
+    );
+    assert_eq!(
+        h.ed.doc.get(children[1]).unwrap().style.fill(),
+        Some(Color::rgb(0x3e, 0x8c, 0x7a))
+    );
+    assert!(created.get("ignoredStyles").is_none(), "{created}");
+    let id = exec::node_key(&h.ed, 0, children[1]);
+    call(
+        &mut h,
+        "update_styles",
+        json!({"updates": [{"nodeIds": [id], "styles": {"--accent": "#0000ff", "backgroundColor": "var(--accent)"}}]}),
+    );
+    assert_eq!(
+        h.ed.doc.get(children[1]).unwrap().style.fill(),
+        Some(Color::rgb(0, 0, 255))
+    );
+}
+
+#[test]
+fn nowrap_text_with_ellipsis_stays_inside_its_box() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Ellipsis", "styles": {"width": 300, "height": 100}}),
+    );
+    let result = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+        "html": "<span style='width:80px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>A very long delivery note</span>"}),
+    );
+    assert_eq!(result["createdNodeIds"].as_array().unwrap().len(), 1);
+    assert!(result.get("ignoredStyles").is_none(), "{result}");
+    let id = &result["createdNodeIds"][0];
+    let n = h.ed.doc.get(num(id)).unwrap();
+    assert_eq!(n.rect.w, 80.0);
+    let layout = sketch_rs::text::layout_node(n).unwrap();
+    assert_eq!(layout.lines.len(), 1);
+    let last = layout.glyphs.last().unwrap();
+    assert_eq!(
+        last.gid,
+        sketch_rs::text::face_of(last.face)
+            .glyph_index('…')
+            .unwrap()
+            .0
+    );
+    assert!(last.x + last.advance <= n.rect.w + 0.01);
+    let styles = call(&mut h, "get_computed_styles", json!({"nodeIds": [id]}));
+    assert_eq!(styles[id.as_str().unwrap()]["overflow"], "hidden");
+    assert_eq!(styles[id.as_str().unwrap()]["textOverflow"], "ellipsis");
+}
+
+#[test]
+fn min_max_width_constrain_hug_and_fill_layout() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Sizes", "styles": {"width": 460, "height": 250}}),
+    );
+    let result = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+        "html": "<div layer-name='Max' style='display:flex;width:100%;max-width:220px'><span>Large</span></div><div layer-name='Min' style='display:flex;flex-direction:column;width:fit-content;min-width:120px'><span>Small</span></div><span style='max-width:80px'>A long piece of text that must wrap</span>"}),
+    );
+    let ids = result["createdNodeIds"].as_array().unwrap();
+    assert_eq!(h.ed.doc.get(num(&ids[0])).unwrap().rect.w, 220.0);
+    assert_eq!(h.ed.doc.get(num(&ids[1])).unwrap().rect.w, 120.0);
+    let styles = call(&mut h, "get_computed_styles", json!({"nodeIds": ids}));
+    assert_eq!(styles[ids[0].as_str().unwrap()]["maxWidth"], "220px");
+    assert_eq!(styles[ids[1].as_str().unwrap()]["minWidth"], "120px");
+    let text_node = h.ed.doc.get(num(&ids[2])).unwrap();
+    assert!(text_node.rect.w <= 80.0);
+    assert!(sketch_rs::text::layout_node(text_node).unwrap().lines.len() > 1);
+}
+
+#[test]
+fn write_html_returns_every_created_layer_with_name_and_parent() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Tree", "styles": {"width": 300, "height": 200}}),
+    );
+    let result = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+        "html": "<div layer-name='Card' style='display:flex;flex-direction:column'><div layer-name='Row' style='display:flex'><span layer-name='Label'>Hello</span></div></div>"}),
+    );
+    assert_eq!(
+        result["createdNodeIds"].as_array().unwrap().len(),
+        1,
+        "keep legacy top-level list"
+    );
+    let created = result["created"]
+        .as_array()
+        .expect("list all created nodes");
+    assert_eq!(created.len(), 3, "card, row and text");
+    assert_eq!(created[0]["id"], result["createdNodeIds"][0]);
+    assert_eq!(created[0]["parent"], artboard["id"]);
+    assert_eq!(created[0]["name"], "Card");
+    assert_eq!(created[1]["parent"], created[0]["id"]);
+    assert_eq!(created[1]["name"], "Row");
+    assert_eq!(created[2]["parent"], created[1]["id"]);
+    assert_eq!(created[2]["name"], "Label");
+}
+
+#[test]
+fn replacing_text_clears_old_runs_and_html_rebuilds_them() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Rich", "styles": {"width": 300, "height": 150}}),
+    );
+    let created = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children", "html": "<p>Bill <b>14286147</b></p>"}),
+    );
+    let id = &created["createdNodeIds"][0];
+    let original = h.ed.doc.get(num(id)).unwrap();
+    assert_eq!(original.kind.text().unwrap(), "Bill 14286147");
+    assert!(
+        original
+            .text_style
+            .spans
+            .iter()
+            .any(|s| s.bold == Some(true))
+    );
+    call(
+        &mut h,
+        "set_text_content",
+        json!({"updates": [{"nodeId": id, "textContent": "Bill 14285982 (updated)"}]}),
+    );
+    let plain = h.ed.doc.get(num(id)).unwrap();
+    assert_eq!(plain.kind.text().unwrap(), "Bill 14285982 (updated)");
+    assert!(
+        plain.text_style.spans.is_empty(),
+        "old runs must not style new positions"
+    );
+    call(
+        &mut h,
+        "set_text_content",
+        json!({"updates": [{"nodeId": id, "textContent": "", "html": "Bill <b>14285982</b> <span style='color:#ff0000'>paid</span>"}]}),
+    );
+    let rich = h.ed.doc.get(num(id)).unwrap();
+    assert_eq!(rich.kind.text().unwrap(), "Bill 14285982 paid");
+    assert!(
+        rich.text_style
+            .spans
+            .iter()
+            .any(|s| s.start == 5 && s.end == 13 && s.bold == Some(true))
+    );
+    assert!(
+        rich.text_style
+            .spans
+            .iter()
+            .any(|s| s.start == 14 && s.end == 18 && s.color == Some(Color::rgb(255, 0, 0)))
+    );
+}
+
+#[test]
+fn find_nodes_matches_substrings_and_query_in_absolute_children() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Invoice", "styles": {"width": 300, "height": 200}}),
+    );
+    let created = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+        "html": "<div style='position:absolute;left:5px;top:5px'><span>Delivery note GRN-2231: 1 case</span></div>"}),
+    );
+    let root = num(&created["createdNodeIds"][0]);
+    let text_id =
+        h.ed.doc
+            .subtree(root)
+            .into_iter()
+            .find(|id| h.ed.doc.get(*id).unwrap().kind.text().is_some())
+            .unwrap();
+    let text_key = exec::node_key(&h.ed, 0, text_id);
+    for args in [
+        json!({"nodeId": artboard["id"], "textValue": "GRN-2231"}),
+        json!({"nodeId": artboard["id"], "query": "grn-2231"}),
+        json!({"nodeId": artboard["id"], "textValue": "*GRN-2231*"}),
+    ] {
+        let found = call(&mut h, "find_nodes", args);
+        assert_eq!(found["count"], 1, "{found}");
+        assert_eq!(found["results"][0]["id"], text_key);
+    }
+    let anchored = call(
+        &mut h,
+        "find_nodes",
+        json!({"nodeId": artboard["id"], "textValue": "GRN-2231*"}),
+    );
+    assert_eq!(anchored["count"], 0, "wildcard matching stays anchored");
+}
+
+#[test]
+fn set_text_content_validates_whole_batch_before_editing() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Batch", "styles": {"width": 300, "height": 200}}),
+    );
+    let created = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children", "html": "<p>First</p><div layer-name='Bad frame'></div><p>Last</p>"}),
+    );
+    let ids = created["createdNodeIds"].as_array().unwrap();
+    let (first, bad, last) = (ids[0].clone(), ids[1].clone(), ids[2].clone());
+    let before = h.ed.history.undo_len();
+    let err = exec::call(
+        &mut h,
+        "set_text_content",
+        &json!({"updates": [
+            {"nodeId": first, "textContent": "Changed"},
+            {"nodeId": bad, "textContent": "Nope"},
+            {"nodeId": last, "textContent": "Also changed"}
+        ]}),
+    )
+    .unwrap_err();
+    assert!(
+        err.contains(bad.as_str().unwrap()) && err.contains("Bad frame"),
+        "{err}"
+    );
+    assert_eq!(
+        h.ed.history.undo_len(),
+        before,
+        "failed batch must not add an undo step"
+    );
+    assert_eq!(
+        h.ed.doc
+            .get(num(&first))
+            .unwrap()
+            .kind
+            .text()
+            .map(String::as_str),
+        Some("First")
+    );
+    assert_eq!(
+        h.ed.doc
+            .get(num(&last))
+            .unwrap()
+            .kind
+            .text()
+            .map(String::as_str),
+        Some("Last")
+    );
+    let ok = call(
+        &mut h,
+        "set_text_content",
+        json!({"updates": [
+            {"nodeId": first, "textContent": "Changed"},
+            {"nodeId": last, "textContent": "Also changed"}
+        ]}),
+    );
+    assert_eq!(ok["updated"], 2);
+    assert_eq!(h.ed.history.undo_len(), before + 1);
+    call(&mut h, "undo", json!({}));
+    assert_eq!(
+        h.ed.doc
+            .get(num(&first))
+            .unwrap()
+            .kind
+            .text()
+            .map(String::as_str),
+        Some("First")
+    );
+    assert_eq!(
+        h.ed.doc
+            .get(num(&last))
+            .unwrap()
+            .kind
+            .text()
+            .map(String::as_str),
+        Some("Last")
+    );
 }
 
 #[test]
@@ -417,6 +966,240 @@ fn screenshot_returns_png() {
     let img = image::load_from_memory(data).unwrap().to_rgba8();
     assert_eq!(img.dimensions(), (400, 200));
     let p = img.get_pixel(200, 100).0;
+    assert!(p[0] > 240 && p[1] < 20 && p[2] < 20, "{p:?}");
+}
+
+#[test]
+fn monospace_family_and_missing_glyph_fallback() {
+    use sketch_rs::model::TextAlign;
+    let fallback = sketch_rs::text::layout("▾", 16.0, None, TextAlign::Left);
+    assert_ne!(
+        fallback.glyphs[0].face, 0,
+        "missing glyph must use a fallback, not '?' in Inter"
+    );
+    assert!(sketch_rs::text::face_of(0).glyph_index('▾').is_none());
+    assert!(
+        sketch_rs::text::face_of(fallback.glyphs[0].face)
+            .glyph_index('▾')
+            .is_some()
+    );
+    assert!(
+        !sketch_rs::text::glyph_path(
+            fallback.glyphs[0].face,
+            fallback.glyphs[0].gid,
+            sketch_rs::geom::v2(0.0, 0.0),
+            16.0
+        )
+        .is_empty()
+    );
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Fonts", "styles": {"width": 300, "height": 300}}),
+    );
+    let result = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+               "html": "<span style='font-family:monospace'>iW</span><span style='font-family:monospace;font-weight:700'>iW</span>"}),
+    );
+    for (i, face) in [6, 7].into_iter().enumerate() {
+        let id = &result["createdNodeIds"][i];
+        let n = h.ed.doc.get(num(id)).unwrap();
+        let layout = sketch_rs::text::layout_node(n).unwrap();
+        assert!(layout.glyphs.iter().all(|g| g.face == face));
+        assert!((layout.glyphs[0].advance - layout.glyphs[1].advance).abs() < 0.001);
+        let style: sketch_rs::model::TextStyle =
+            serde_json::from_value(serde_json::to_value(&n.text_style).unwrap()).unwrap();
+        assert_eq!(style, n.text_style);
+        let styles = call(&mut h, "get_computed_styles", json!({"nodeIds": [id]}));
+        assert_eq!(styles[id.as_str().unwrap()]["fontFamily"], "Noto Sans Mono");
+    }
+}
+
+#[test]
+fn font_weights_use_bundled_medium_and_semibold() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Weights", "styles": {"width": 300, "height": 300}}),
+    );
+    let result = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+               "html": "<span style='font-weight:400'>A</span><span style='font-weight:500'>A</span><span style='font-weight:600'>A</span><span style='font-weight:700'>A</span>"}),
+    );
+    for (i, expected) in [0, 4, 5, 1].into_iter().enumerate() {
+        let id = &result["createdNodeIds"][i];
+        let n = h.ed.doc.get(num(id)).unwrap();
+        let layout = sketch_rs::text::layout_node(n).unwrap();
+        assert_eq!(layout.glyphs[0].face, expected, "weight {}", (i + 4) * 100);
+        let styles = call(&mut h, "get_computed_styles", json!({"nodeIds": [id]}));
+        assert_eq!(
+            styles[id.as_str().unwrap()]["fontWeight"],
+            format!("{}", (i + 4) * 100)
+        );
+    }
+    let old_style: sketch_rs::model::TextStyle = serde_json::from_str(r#"{"bold":true}"#).unwrap();
+    let legacy = sketch_rs::text::layout_rich(
+        "A",
+        16.0,
+        sketch_rs::model::Color::INK,
+        &old_style,
+        None,
+        sketch_rs::model::TextAlign::Left,
+    );
+    assert_eq!(
+        legacy.glyphs[0].face, 1,
+        "old saved bold text still renders bold"
+    );
+}
+
+#[test]
+fn border_bottom_only_renders_on_bottom_and_can_be_removed() {
+    use sketch_rs::render::draw::{self, DrawOp};
+    use sketch_rs::vector::Seg;
+
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Borders", "styles": {"width": 100, "height": 100}}),
+    );
+    let result = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+               "html": r#"<div layer-name="Bottom" style="width:60px;height:30px;border-bottom:2px solid #ff0000"></div>"#}),
+    );
+    let id = &result["createdNodeIds"][0];
+    let node = num(id);
+    let n = h.ed.doc.get(node).unwrap();
+    let wr = h.ed.doc.world_rect(node).unwrap();
+    let drawn = draw::node_draw(n, wr, 1.0);
+    let strokes: Vec<_> = drawn
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            DrawOp::Stroke { path, width, .. } => Some((path, width)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(strokes.len(), 1, "only the bottom edge should be outlined");
+    assert_eq!(*strokes[0].1, 2.0);
+    assert!(
+        matches!(strokes[0].0.segs.as_slice(), [Seg::M(a), Seg::L(b)] if
+        (a.y - (wr.y + wr.h - 1.0)).abs() < 1e-9 &&
+        (b.y - a.y).abs() < 1e-9 &&
+        (b.x - a.x - wr.w).abs() < 1e-9)
+    );
+    let saved = serde_json::to_value(&n.style).unwrap();
+    assert!(
+        saved.get("border_sides").is_some(),
+        "border sides must persist in documents"
+    );
+    let restored: sketch_rs::model::Style = serde_json::from_value(saved).unwrap();
+    assert_eq!(restored, n.style);
+    let styles = call(&mut h, "get_computed_styles", json!({"nodeIds": [id]}));
+    assert_eq!(
+        styles[id.as_str().unwrap()]["borderBottom"],
+        "2px solid #ff0000"
+    );
+    assert!(styles[id.as_str().unwrap()].get("border").is_none());
+    let jsx = call(&mut h, "get_jsx", json!({"nodeId": id}));
+    assert!(jsx.as_str().unwrap().contains("borderBottom"), "{jsx}");
+
+    if sketch_rs::render::gpu::Headless::new().is_ok() {
+        let outs = exec::call(&mut h, "get_screenshot", &json!({"nodeId": id})).unwrap();
+        let Out::Image { data, .. } = &outs[0] else {
+            panic!("expected PNG")
+        };
+        let img = image::load_from_memory(data).unwrap().to_rgba8();
+        assert_eq!(img.dimensions(), (60, 30));
+        let top = img.get_pixel(30, 2).0;
+        assert!(top[1] > 220 && top[2] > 220, "top must not be red: {top:?}");
+        let bottom = img.get_pixel(30, 29).0;
+        assert!(
+            bottom[0] > 220 && bottom[1] < 40 && bottom[2] < 40,
+            "{bottom:?}"
+        );
+    }
+
+    call(
+        &mut h,
+        "update_styles",
+        json!({"updates": [{"nodeIds": [id], "styles": {"borderBottom": "none"}}]}),
+    );
+    let n = h.ed.doc.get(node).unwrap();
+    let drawn = draw::node_draw(n, h.ed.doc.world_rect(node).unwrap(), 1.0);
+    assert!(
+        !drawn
+            .ops
+            .iter()
+            .any(|op| matches!(op, DrawOp::Stroke { .. }))
+    );
+
+    call(
+        &mut h,
+        "update_styles",
+        json!({"updates": [{"nodeIds": [id], "styles": {"border": "1px solid #0000ff", "borderBottom": "2px solid #ff0000"}}]}),
+    );
+    let n = h.ed.doc.get(node).unwrap();
+    assert!(
+        n.style.stroke.is_some(),
+        "the full border must remain independent"
+    );
+    assert!(n.style.border_sides[2].is_some());
+    call(
+        &mut h,
+        "update_styles",
+        json!({"updates": [{"nodeIds": [id], "styles": {"borderBottom": "none"}}]}),
+    );
+    let n = h.ed.doc.get(node).unwrap();
+    assert!(n.style.border_sides[2].is_none());
+    assert_eq!(n.style.stroke_width, 1.0);
+    assert!(
+        n.style.stroke.is_some(),
+        "removing one side must preserve the outline"
+    );
+}
+
+#[test]
+fn screenshot_of_layer_inside_clipping_artboard() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Desktop", "styles": {"width": 200, "height": 100}}),
+    );
+    let card = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+               "html": "<div layer-name=\"Card\" style=\"width:60px;height:30px;background:#ff0000\"></div>"}),
+    );
+    let id = card["createdNodeIds"][0].clone();
+    let node = num(&id);
+    assert_eq!(
+        sketch_rs::io::svg::export_bounds(&h.ed.doc, &[node]),
+        h.ed.doc.world_rect(node),
+        "the selected frame should not be excluded by its artboard's clip",
+    );
+    if sketch_rs::render::gpu::Headless::new().is_err() {
+        eprintln!("no GPU adapter; skipping screenshot assertions");
+        return;
+    }
+    let outs = exec::call(&mut h, "get_screenshot", &json!({"nodeId": id})).unwrap();
+    let Out::Image { data, mime } = &outs[0] else {
+        panic!("expected screenshot")
+    };
+    assert_eq!(mime, "image/png");
+    let img = image::load_from_memory(data).unwrap().to_rgba8();
+    assert_eq!(img.dimensions(), (60, 30));
+    let p = img.get_pixel(30, 15).0;
     assert!(p[0] > 240 && p[1] < 20 && p[2] < 20, "{p:?}");
 }
 
@@ -561,6 +1344,58 @@ async fn http_rejects_browsers_and_unknown_routes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stdio_bridge_lists_the_running_apps_tools() {
+    use rmcp::model::{ListToolsResult, PaginatedRequestParams, ServerConfig};
+    use rmcp::service::RequestContext;
+    use rmcp::transport::streamable_http_server::{
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+    };
+    use rmcp::{ErrorData, RoleServer, ServerHandler};
+
+    #[derive(Clone)]
+    struct AppWithDifferentTools;
+    impl ServerHandler for AppWithDifferentTools {
+        fn get_info(&self) -> ServerConfig {
+            mcp::server::info()
+        }
+        async fn list_tools(
+            &self,
+            _: Option<PaginatedRequestParams>,
+            _: RequestContext<RoleServer>,
+        ) -> Result<ListToolsResult, ErrorData> {
+            Ok(ListToolsResult::with_all_items(vec![
+                mcp::server::tool_list().remove(0),
+            ]))
+        }
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let service: StreamableHttpService<AppWithDifferentTools, LocalSessionManager> =
+        StreamableHttpService::new(
+            || Ok(AppWithDifferentTools),
+            Default::default(),
+            StreamableHttpServerConfig::default(),
+        );
+    let http = tokio::spawn(async move {
+        axum::serve(listener, axum::Router::new().nest_service("/mcp", service))
+            .await
+            .unwrap();
+    });
+    let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_sketch-rs-mcp"));
+    cmd.env("SKETCH_RS_MCP_PORT", port.to_string());
+    let client = ().serve(rmcp::transport::TokioChildProcess::new(cmd).unwrap()).await.unwrap();
+    let tools = client.list_all_tools().await.unwrap();
+    assert_eq!(
+        tools.len(),
+        1,
+        "use the app's catalogue, not the bridge's local list"
+    );
+    assert_eq!(tools[0].name, mcp::server::tool_list()[0].name);
+    client.cancel().await.unwrap();
+    http.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stdio_bridge_relays_to_the_app() {
     let (running, _worker) = spawn_app();
     let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_sketch-rs-mcp"));
@@ -684,5 +1519,518 @@ fn agent_design_screenshot() {
         ab_node.rect.h > 400.0,
         "artboard hugs its content: {:?}",
         ab_node.rect
+    );
+}
+
+#[test]
+fn ellipsis_text_sized_by_its_row_stays_inside_the_cell() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Table", "styles": {"width": 300, "height": 100}}),
+    );
+    let ell = "white-space:nowrap;overflow:hidden;text-overflow:ellipsis";
+    let result = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+        "html": format!("<div style='display:flex;width:240px'>\
+            <div layer-name='Fixed' style='display:flex;flex-direction:column;width:100px'><span layer-name='A' style='{ell}'>A very long delivery note</span></div>\
+            <div layer-name='Row' style='display:flex;flex:1'><span layer-name='B' style='flex:1;{ell}'>Another very long delivery note here</span></div>\
+            <div layer-name='Shrink' style='display:flex;width:40px'><span layer-name='C' style='{ell}'>Third long note</span></div>\
+            </div>")}),
+    );
+    for created in result["created"].as_array().unwrap() {
+        if !["A", "B", "C"].contains(&created["name"].as_str().unwrap()) {
+            continue;
+        }
+        let n = h.ed.doc.get(num(&created["id"])).unwrap();
+        let parent = h.ed.doc.get(num(&created["parent"])).unwrap();
+        assert!(
+            n.rect.w <= parent.rect.w + 0.01,
+            "{} {} > {}",
+            created["name"],
+            n.rect.w,
+            parent.rect.w
+        );
+        let layout = sketch_rs::text::layout_node(n).unwrap();
+        let last = layout.glyphs.last().unwrap();
+        assert_eq!(
+            last.gid,
+            sketch_rs::text::face_of(last.face)
+                .glyph_index('…')
+                .unwrap()
+                .0,
+            "{} has no ellipsis",
+            created["name"]
+        );
+        assert!(last.x + last.advance <= n.rect.w + 0.01);
+    }
+}
+
+#[test]
+fn divider_stays_inside_the_border_of_a_rounded_box() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Card", "styles": {"width": 300, "height": 200}}),
+    );
+    let result = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+        "html": "<div layer-name='Box' style='display:flex;flex-direction:column;width:200px;border:2px solid #000;border-radius:12px;overflow:hidden'><div style='height:40px'></div><div layer-name='Divider' style='height:1px;background:#f00'></div><div style='height:40px'></div></div>"}),
+    );
+    let created = result["created"].as_array().unwrap();
+    let find = |name: &str| {
+        let c = created.iter().find(|c| c["name"] == name).unwrap();
+        h.ed.doc.get(num(&c["id"])).unwrap().clone()
+    };
+    let (b, d) = (find("Box"), find("Divider"));
+    assert_eq!(b.rect.w, 200.0);
+    assert_eq!(d.rect.x, 2.0, "divider starts inside the left border");
+    assert_eq!(d.rect.w, 196.0, "divider ends inside the right border");
+    assert_eq!(b.rect.h, 85.0, "border adds to hug height");
+}
+
+#[test]
+fn box_shadows_render_outside_frame_in_all_vector_backends() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Shadows", "styles": {"width": 200, "height": 150}}),
+    );
+    let created = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+        "html": "<div style='width:60px;height:40px;background:#ffffff;box-shadow: 2px 4px 6px 1px #00000080'></div>"}),
+    );
+    assert!(created.get("ignoredStyles").is_none(), "{created}");
+    let id = num(&created["createdNodeIds"][0]);
+    let n = h.ed.doc.get(id).unwrap();
+    let wr = h.ed.doc.world_rect(id).unwrap();
+    assert!(!n.style.shadows.is_empty());
+    let ops = sketch_rs::render::draw::node_draw(n, wr, 1.0).ops;
+    assert!(ops.len() > 2, "soft shadow ops should precede the fill");
+    let bounds = sketch_rs::render::draw::draw_bounds(n, wr);
+    assert!(bounds.x < wr.x && bounds.y < wr.y && bounds.w > wr.w);
+    let serialized: sketch_rs::model::Style =
+        serde_json::from_value(serde_json::to_value(&n.style).unwrap()).unwrap();
+    assert_eq!(serialized, n.style);
+}
+
+#[test]
+fn css_rotate_turns_a_layer_and_its_children_when_drawn() {
+    let mut h = host();
+    let ab = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Turn", "styles": {"width": "200px", "height": "200px", "backgroundColor": "#ffffff"}}),
+    );
+    let created = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": ab["id"], "mode": "insert-children",
+        "html": "<div layer-name='Bar' style='position:absolute;left:50px;top:95px;width:100px;height:10px;background:#ff0000;transform:rotate(90deg)'><span style='font-size:8px'>Hi</span></div><div layer-name='Moved' style='transform:translateX(4px)'></div>"}),
+    );
+    // Only the unsupported translate is reported.
+    let ignored = created["ignoredStyles"].to_string();
+    assert!(
+        ignored.contains("transform") && created["created"].as_array().unwrap().len() == 3,
+        "{created}"
+    );
+    let find = |name: &str| {
+        let c = created["created"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap();
+        num(&c["id"])
+    };
+    let (bar, label) = (find("Bar"), find("Hi"));
+    let doc = &h.ed.doc;
+    assert_eq!(doc.get(bar).unwrap().style.rotation, 90.0);
+    // Layout keeps the upright box; the drawn bounds turn.
+    assert_eq!(doc.get(bar).unwrap().rect.w, 100.0);
+    let info = call(
+        &mut h,
+        "get_node_info",
+        json!({"nodeId": created["created"][0]["id"]}),
+    );
+    let b = &info["drawnBounds"];
+    assert!((b["width"].as_f64().unwrap() - 10.0).abs() < 0.5, "{b}");
+    assert!((b["height"].as_f64().unwrap() - 100.0).abs() < 0.5, "{b}");
+    let styles = call(
+        &mut h,
+        "get_computed_styles",
+        json!({"nodeIds": [created["created"][0]["id"]]}),
+    );
+    assert_eq!(
+        styles[created["created"][0]["id"].as_str().unwrap()]["transform"],
+        "rotate(90deg)"
+    );
+    // The child text inherits the turn, so its glyphs become outline fills.
+    let doc = &h.ed.doc;
+    let xf = sketch_rs::render::draw::world_xf(doc, label).expect("child inherits rotation");
+    let ln = doc.get(label).unwrap();
+    let ops = sketch_rs::render::draw::transform_ops(
+        sketch_rs::render::draw::node_draw(ln, doc.world_rect(label).unwrap(), 1.0).ops,
+        &xf,
+    );
+    assert!(
+        ops.iter()
+            .all(|o| !matches!(o, sketch_rs::render::draw::DrawOp::Glyphs { .. }))
+    );
+
+    if sketch_rs::render::gpu::Headless::new().is_err() {
+        eprintln!("no GPU adapter; skipping pixels");
+        return;
+    }
+    let outs = exec::call(
+        &mut h,
+        "get_screenshot",
+        &json!({"nodeId": ab["id"], "scale": 1}),
+    )
+    .unwrap();
+    let Out::Image { data, .. } = &outs[0] else {
+        panic!()
+    };
+    let img = image::load_from_memory(data).unwrap().to_rgba8();
+    // Upright, the bar would cover (60, 100); turned 90°, it covers (100, 60) instead.
+    let on = img.get_pixel(100, 60).0;
+    let off = img.get_pixel(60, 100).0;
+    assert!(on[0] > 200 && on[1] < 60, "turned bar missing: {on:?}");
+    assert!(off[1] > 200, "upright bar still drawn: {off:?}");
+}
+
+#[test]
+fn layered_shadow_composites_to_its_css_alpha() {
+    let mut h = host();
+    let ab = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "S", "styles": {"width": 200, "height": 200}}),
+    );
+    let created = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": ab["id"], "mode": "insert-children",
+        "html": "<div style='width:60px;height:40px;background:#fff;box-shadow:0 2px 8px rgba(0,0,0,0.5), 0 0 0 1px #000'></div>"}),
+    );
+    let id = num(&created["createdNodeIds"][0]);
+    let n = h.ed.doc.get(id).unwrap();
+    assert_eq!(n.style.shadows.len(), 2);
+    let ops = sketch_rs::render::draw::node_draw(n, h.ed.doc.world_rect(id).unwrap(), 1.0).ops;
+    let alphas: Vec<f32> = ops
+        .iter()
+        .take(8) // blur 8px → 8 layers
+        .map(|o| match o {
+            sketch_rs::render::draw::DrawOp::Fill {
+                paint: sketch_rs::render::draw::PaintSpec::Solid(c),
+                ..
+            } => c[3],
+            _ => panic!("{o:?}"),
+        })
+        .collect();
+    let covered = 1.0 - alphas.iter().map(|a| 1.0 - a).product::<f32>();
+    assert!((covered - 0.5).abs() < 0.01, "{covered}");
+}
+
+#[test]
+fn inset_shadow_draws_a_ring_inside_the_box() {
+    let mut h = host();
+    let ab = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Inset", "styles": {"width": "200px", "height": "200px", "backgroundColor": "#ffffff"}}),
+    );
+    let created = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": ab["id"], "mode": "insert-children",
+        "html": "<div style='position:absolute;left:50px;top:50px;width:100px;height:100px;background:#ffffff;border-radius:16px;box-shadow:inset 0 0 0 10px #ff0000, 0 4px 8px #00000040'></div>"}),
+    );
+    assert!(created.get("ignoredStyles").is_none(), "{created}");
+    let id = &created["createdNodeIds"][0];
+    let n = h.ed.doc.get(num(id)).unwrap();
+    assert!(n.style.shadows[0].inset && !n.style.shadows[1].inset);
+    // Only the outer shadow grows the drawn bounds.
+    let wr = h.ed.doc.world_rect(num(id)).unwrap();
+    let b = sketch_rs::render::draw::draw_bounds(n, wr);
+    assert!(b.y >= wr.y - 4.0 && b.bottom() > wr.bottom() + 4.0, "{b:?}");
+    let styles = call(&mut h, "get_computed_styles", json!({"nodeIds": [id]}));
+    assert!(
+        styles[id.as_str().unwrap()]["boxShadow"]
+            .as_str()
+            .unwrap()
+            .starts_with("inset 0px 0px 0px 10px"),
+        "{styles}"
+    );
+    if sketch_rs::render::gpu::Headless::new().is_err() {
+        eprintln!("no GPU adapter; skipping pixels");
+        return;
+    }
+    let outs = exec::call(
+        &mut h,
+        "get_screenshot",
+        &json!({"nodeId": ab["id"], "scale": 1}),
+    )
+    .unwrap();
+    let Out::Image { data, .. } = &outs[0] else {
+        panic!()
+    };
+    let img = image::load_from_memory(data).unwrap().to_rgba8();
+    let ring = img.get_pixel(55, 100).0; // 5px inside the left edge
+    let middle = img.get_pixel(100, 100).0;
+    let outside_corner = img.get_pixel(52, 52).0; // cut off by the 16px radius
+    assert!(ring[0] > 200 && ring[1] < 60, "ring missing: {ring:?}");
+    assert!(middle[1] > 200, "middle should stay white: {middle:?}");
+    assert!(
+        outside_corner[1] > 150,
+        "ring leaks past the rounded corner: {outside_corner:?}"
+    );
+}
+
+/// Created layers by name (text layers are named by their content).
+fn by_name(h: &exec::SessionHost, created: &Value, name: &str) -> sketch_rs::model::Node {
+    let c = created["created"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == name)
+        .unwrap_or_else(|| panic!("no layer {name} in {created}"));
+    h.ed.doc.get(num(&c["id"])).unwrap().clone()
+}
+
+fn write(h: &mut exec::SessionHost, w: u32, html: &str) -> Value {
+    let ab = call(
+        h,
+        "create_artboard",
+        json!({"name": "T", "styles": {"width": format!("{w}px"), "height": "400px"}}),
+    );
+    call(
+        h,
+        "write_html",
+        json!({"targetNodeId": ab["id"], "mode": "insert-children", "html": html}),
+    )
+}
+
+#[test]
+fn grid_keeps_its_cells_in_equal_tracks() {
+    let mut h = host();
+    let c = write(
+        &mut h,
+        400,
+        "<div layer-name='Grid' style='display:grid;grid-template-columns:repeat(2, 1fr);gap:10px;width:210px'><span>a</span><span>b</span><span>c</span><span>d</span></div>\
+         <div layer-name='Stack' style='display:grid;width:100px'><span>e</span><span>f</span></div>\
+         <div layer-name='Boxes' style='display:grid;grid-template-columns:repeat(2, 1fr)'><div layer-name='Cell' style='padding:8px;background:#fff'><span>g</span></div><div style='padding:8px;background:#fff'><span>h</span></div></div>",
+    );
+    let cell = by_name(&h, &c, "Cell");
+    assert!(
+        cell.rect.h > 16.0,
+        "box cells keep their content height: {:?}",
+        cell.rect
+    );
+    assert!(by_name(&h, &c, "Boxes").rect.h >= cell.rect.h);
+    assert!(c.get("ignoredStyles").is_none(), "{c}");
+    let (a, b, cc, d) = (
+        by_name(&h, &c, "a"),
+        by_name(&h, &c, "b"),
+        by_name(&h, &c, "c"),
+        by_name(&h, &c, "d"),
+    );
+    assert_eq!((a.rect.x, a.rect.w), (0.0, 100.0));
+    assert_eq!((b.rect.x, b.rect.y), (110.0, a.rect.y));
+    assert_eq!(cc.rect.x, 0.0);
+    assert!(
+        cc.rect.y >= a.rect.y + a.rect.h + 10.0 - 0.01,
+        "{:?}",
+        cc.rect
+    );
+    assert_eq!(d.rect.x, 110.0);
+    // No template: one column.
+    let (e, f) = (by_name(&h, &c, "e"), by_name(&h, &c, "f"));
+    assert_eq!(e.rect.x, f.rect.x);
+    assert!(f.rect.y > e.rect.y);
+    let grid = &c["created"][0]["id"];
+    let s = call(&mut h, "get_computed_styles", json!({"nodeIds": [grid]}));
+    assert_eq!(
+        s[grid.as_str().unwrap()]["gridTemplateColumns"],
+        "repeat(2, 1fr)"
+    );
+}
+
+#[test]
+fn relative_offsets_move_one_item_and_static_offsets_are_reported() {
+    let mut h = host();
+    let c = write(
+        &mut h,
+        400,
+        "<div style='display:flex'><span>A</span><span style='position:relative;top:4px;left:2px'>B</span><span>C</span></div><span style='top:9px'>Static</span>",
+    );
+    let (a, b, cc) = (
+        by_name(&h, &c, "A"),
+        by_name(&h, &c, "B"),
+        by_name(&h, &c, "C"),
+    );
+    assert_eq!(b.rect.y, a.rect.y + 4.0);
+    assert!((b.rect.x - (a.rect.w + 2.0)).abs() < 0.01, "{:?}", b.rect);
+    assert!(
+        (cc.rect.x - (a.rect.w + b.rect.w)).abs() < 0.01,
+        "siblings stay put"
+    );
+    assert!(c["ignoredStyles"].to_string().contains("top"), "{c}");
+}
+
+#[test]
+fn outline_draws_outside_without_moving_children() {
+    let mut h = host();
+    let c = write(
+        &mut h,
+        400,
+        "<div layer-name='Ring' style='display:flex;outline:2px solid #2563eb'><div layer-name='Dot' style='width:10px;height:10px;background:#000'></div></div>",
+    );
+    let (ring, dot) = (by_name(&h, &c, "Ring"), by_name(&h, &c, "Dot"));
+    assert_eq!(
+        (dot.rect.x, dot.rect.y),
+        (0.0, 0.0),
+        "outline takes no space"
+    );
+    assert_eq!(ring.rect.h, 10.0);
+    assert_eq!(
+        ring.style.stroke_align,
+        sketch_rs::model::StrokeAlign::Outside
+    );
+    let id = &c["created"][0]["id"];
+    let s = call(&mut h, "get_computed_styles", json!({"nodeIds": [id]}));
+    assert!(
+        s[id.as_str().unwrap()]["outline"]
+            .as_str()
+            .unwrap()
+            .starts_with("2px solid"),
+        "{s}"
+    );
+}
+
+#[test]
+fn wavy_colored_underline_keeps_its_style() {
+    let mut h = host();
+    let c = write(
+        &mut h,
+        400,
+        "<span style='text-decoration:underline wavy #ff0000'>Check this</span><span style='text-decoration:underline dotted'>Dots</span>",
+    );
+    assert_eq!(
+        c["ignoredStyles"],
+        json!(["textDecoration"]),
+        "dotted is reported: {c}"
+    );
+    let n = by_name(&h, &c, "Check this");
+    assert!(n.text_style.decoration_wavy);
+    let wr = h.ed.doc.world_rect(n.id).unwrap();
+    let ops = sketch_rs::render::draw::node_draw(&n, wr, 1.0).ops;
+    assert!(ops.iter().any(|o| matches!(o, sketch_rs::render::draw::DrawOp::Stroke { color, .. } if color[0] > 0.99 && color[1] < 0.01)));
+}
+
+#[test]
+fn auto_margins_align_self_calc_order_and_aspect_ratio() {
+    let mut h = host();
+    let c = write(
+        &mut h,
+        500,
+        "<div style='display:flex;width:300px'><span>Left</span><span style='margin-left:auto'>Right</span></div>\
+         <div style='display:flex;flex-direction:column;width:300px'><div layer-name='Mid' style='width:100px;height:10px;margin:0 auto'></div></div>\
+         <div style='display:flex;height:100px'><div layer-name='C' style='width:10px;height:20px;align-self:center'></div><div layer-name='E' style='width:10px;height:20px;align-self:flex-end'></div></div>\
+         <div layer-name='Calc' style='width:calc(100% - 200px);height:10px;padding:calc(4px * 2)'></div>\
+         <div style='display:flex'><span style='order:2'>x</span><span>y</span><span style='order:-1'>z</span></div>\
+         <div style='display:flex;flex-direction:column;width:200px'><div layer-name='Wide' style='aspect-ratio:2;background:#000'></div></div>\
+         <div layer-name='Video' style='width:160px;aspect-ratio:16 / 9'></div>",
+    );
+    assert!(c.get("ignoredStyles").is_none(), "{c}");
+    let right = by_name(&h, &c, "Right");
+    assert!(
+        (right.rect.x + right.rect.w - 300.0).abs() < 0.01,
+        "{:?}",
+        right.rect
+    );
+    assert_eq!(by_name(&h, &c, "Mid").rect.x, 100.0);
+    assert_eq!(by_name(&h, &c, "C").rect.y, 40.0);
+    assert_eq!(by_name(&h, &c, "E").rect.y, 80.0);
+    let calc = by_name(&h, &c, "Calc");
+    assert_eq!(calc.rect.w, 300.0);
+    assert_eq!(calc.layout.unwrap().padding, [8.0; 4]);
+    let (x, y, z) = (
+        by_name(&h, &c, "x"),
+        by_name(&h, &c, "y"),
+        by_name(&h, &c, "z"),
+    );
+    assert!(
+        z.rect.x < y.rect.x && y.rect.x < x.rect.x,
+        "{:?} {:?} {:?}",
+        z.rect,
+        y.rect,
+        x.rect
+    );
+    let wide = by_name(&h, &c, "Wide");
+    assert_eq!((wide.rect.w, wide.rect.h), (200.0, 100.0));
+    assert_eq!(by_name(&h, &c, "Video").rect.h, 90.0);
+}
+
+#[test]
+fn text_transform_tabular_digits_and_line_clamp() {
+    let mut h = host();
+    let c = write(
+        &mut h,
+        500,
+        "<span style='text-transform:uppercase'>needs your call</span>\
+         <span style='font-variant-numeric:tabular-nums'>1111</span><span style='font-variant-numeric:tabular-nums'>0000</span>\
+         <span>1111</span><span>0000</span>\
+         <p layer-name='Clamp' style='width:120px;-webkit-line-clamp:2;display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden'>A long description that keeps going well past two lines of text</p>",
+    );
+    assert!(c.get("ignoredStyles").is_none(), "{c}");
+    let up = by_name(&h, &c, "needs your call");
+    assert_eq!(up.kind.text().unwrap(), "NEEDS YOUR CALL");
+    let up_id = &c["created"][0]["id"];
+    call(
+        &mut h,
+        "set_text_content",
+        json!({"updates": [{"nodeId": up_id, "textContent": "approved"}]}),
+    );
+    assert_eq!(
+        h.ed.doc.get(num(up_id)).unwrap().kind.text().unwrap(),
+        "APPROVED"
+    );
+    let widths: Vec<f64> = c["created"].as_array().unwrap()[1..5]
+        .iter()
+        .map(|x| {
+            sketch_rs::text::layout_node(h.ed.doc.get(num(&x["id"])).unwrap())
+                .unwrap()
+                .width
+        })
+        .collect();
+    assert!((widths[0] - widths[1]).abs() < 0.01, "tabular: {widths:?}");
+    assert!(
+        (widths[2] - widths[3]).abs() > 1.0,
+        "proportional digits differ: {widths:?}"
+    );
+    let clamp = by_name(&h, &c, "Clamp");
+    let l = sketch_rs::text::layout_node(&clamp).unwrap();
+    assert_eq!(l.lines.len(), 2);
+    let last = l.glyphs.last().unwrap();
+    assert_eq!(
+        last.gid,
+        sketch_rs::text::face_of(last.face)
+            .glyph_index('…')
+            .unwrap()
+            .0
+    );
+    assert!(
+        (clamp.rect.h - l.height.ceil()).abs() < 0.01,
+        "box hugs two lines"
     );
 }

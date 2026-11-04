@@ -37,12 +37,22 @@ pub fn override_key(field: &str) -> &'static str {
 fn copy_props(main: &Node, inst: &mut Node, overrides: &[String], is_root: bool) {
     let ov = |k: &str| overrides.iter().any(|o| o == k);
     let s = &main.style;
+    if !ov("variables") {
+        inst.style.variables = s.variables.clone();
+    }
+    if !ov("shadows") {
+        inst.style.shadows = s.shadows.clone();
+    }
+    if !ov("rotation") {
+        inst.style.rotation = s.rotation;
+    }
     if !ov("fills") {
         inst.style.fills = s.fills.clone();
     }
     if !ov("stroke") {
         inst.style.stroke = s.stroke;
         inst.style.stroke_width = s.stroke_width;
+        inst.style.border_sides = s.border_sides.clone();
         inst.style.stroke_align = s.stroke_align;
         inst.style.dash = s.dash.clone();
         inst.style.cap = s.cap;
@@ -96,6 +106,7 @@ fn copy_props(main: &Node, inst: &mut Node, overrides: &[String], is_root: bool)
     if !ov("layout") {
         inst.layout = main.layout;
         inst.layout_child = main.layout_child;
+        inst.scroll_offset = main.scroll_offset;
     }
     if !is_root && !ov("position") {
         inst.rect.x = main.rect.x;
@@ -438,6 +449,32 @@ impl Editor {
         });
         self.selection = vec![id];
         Some(id)
+    }
+
+    /// Instantiate a component under a parent without changing the user's selection.
+    /// `at` is local to that parent (world coordinates when parent is the page root).
+    pub fn create_instance_under(
+        &mut self,
+        component: NodeId,
+        parent: Option<NodeId>,
+        at: V2,
+    ) -> Option<NodeId> {
+        let main = self.doc.get(component)?;
+        if !main.component
+            || parent.is_some_and(|p| !self.doc.get(p).is_some_and(Node::is_container))
+        {
+            return None;
+        }
+        let size = (main.rect.w, main.rect.h);
+        Some(self.edit("Create instance", |tx| {
+            instantiate(
+                tx,
+                component,
+                parent,
+                None,
+                Some(Rect::new(at.x, at.y, size.0, size.1)),
+            )
+        }))
     }
 
     /// Duplicate the selected component as an instance to its right (Figma: Alt-drag).
