@@ -302,10 +302,11 @@ pub fn fit_text_height(tx: &mut Tx, id: NodeId) {
     if !matches!(n.kind, NodeKind::Text { .. }) {
         return;
     }
-    if let Some(l) = crate::text::layout_node(n)
-        && (l.height - n.rect.h).abs() > 1e-9
-    {
-        tx.node_mut(id).unwrap().rect.h = l.height;
+    if let Some(l) = crate::text::layout_node(n) {
+        let h = n.layout_child.constrain(1, l.height.ceil());
+        if (h - n.rect.h).abs() > 1e-9 {
+            tx.node_mut(id).unwrap().rect.h = h;
+        }
     }
 }
 

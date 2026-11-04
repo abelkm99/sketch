@@ -1671,7 +1671,7 @@ impl Editor {
             } else {
                 n.rect.w
             },
-            l.height,
+            n.layout_child.constrain(1, l.height.ceil()),
         );
         let r = n.rect;
         if ((r.w - w).abs() > 1e-9 || (r.h - h).abs() > 1e-9)

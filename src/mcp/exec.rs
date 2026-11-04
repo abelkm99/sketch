@@ -1216,7 +1216,9 @@ fn fit_text(tx: &mut Tx, id: NodeId, keep_height: bool) {
     } else {
         l.height
     };
-    let h = n.layout_child.constrain(1, h);
+    let h = n
+        .layout_child
+        .constrain(1, if keep_height { h } else { h.ceil() });
     if (n.rect.w - w).abs() > 1e-9 || (n.rect.h - h).abs() > 1e-9 {
         let n = tx.node_mut(id).unwrap();
         n.rect.w = w;

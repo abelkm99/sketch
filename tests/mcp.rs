@@ -349,6 +349,34 @@ fn editing_tools_update_move_duplicate_and_delete() {
 }
 
 #[test]
+fn text_height_snaps_following_dividers_to_pixel_grid() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Pixels", "styles": {"width": 220, "height": 140}}),
+    );
+    let created = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+        "html": "<div style='display:flex;flex-direction:column'><span style='font-size:13px'>Text</span><div layer-name='Divider' style='height:1px;background:#111'></div></div>"}),
+    );
+    let root = h.ed.doc.get(num(&created["createdNodeIds"][0])).unwrap();
+    let t = h.ed.doc.get(root.children[0]).unwrap();
+    let rule = h.ed.doc.get(root.children[1]).unwrap();
+    let natural = sketch_rs::text::layout_node(t).unwrap().height;
+    assert!(t.rect.h >= natural, "rounded height must not clip glyphs");
+    assert_eq!(t.rect.h.fract(), 0.0, "text box should use whole pixels");
+    assert_eq!(
+        rule.rect.y.fract(),
+        0.0,
+        "the following divider must align to a whole pixel"
+    );
+    assert_eq!(rule.rect.h, 1.0);
+}
+
+#[test]
 fn css_custom_properties_inherit_and_var_fallbacks_resolve() {
     let mut h = host();
     let artboard = call(
