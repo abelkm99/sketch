@@ -1,9 +1,9 @@
 //! `sketch-rs-mcp`: MCP over stdio for clients that can't speak HTTP, relayed to the running
 //! Sketch app (`http://127.0.0.1:29980/mcp`, or `$SKETCH_RS_MCP_PORT`).
 //!
-//! The tool list is answered locally, so the agent sees every tool even before the app is
-//! started; calls are forwarded to the app and report a clear error while it isn't running.
-//! The connection is opened lazily and re-opened after the app restarts.
+//! The tool list comes from the running app (falling back to a local list when offline),
+//! so newly deployed app tools appear after a tools/list refresh without restarting the bridge.
+//! Calls are forwarded to the app and reconnect after it restarts.
 
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult,
@@ -77,9 +77,24 @@ impl ServerHandler for Bridge {
 
     async fn list_tools(
         &self,
-        _request: Option<PaginatedRequestParams>,
+        request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
+        // Use a new connection for each catalogue refresh: rmcp caches list_tools replies
+        // on a connection and the app might have been replaced without closing it yet.
+        if self.connect().await.is_ok() {
+            let app = {
+                let client = self.client.lock().await;
+                client.as_ref().unwrap().list_tools(request).await
+            };
+            match app {
+                Ok(tools) => return Ok(tools),
+                Err(e) => {
+                    log::warn!("sketch-rs-mcp: live tool list unavailable: {e}");
+                    *self.client.lock().await = None;
+                }
+            }
+        }
         Ok(ListToolsResult::with_all_items(server::tool_list()))
     }
 

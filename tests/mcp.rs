@@ -1061,6 +1061,58 @@ async fn http_rejects_browsers_and_unknown_routes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stdio_bridge_lists_the_running_apps_tools() {
+    use rmcp::model::{ListToolsResult, PaginatedRequestParams, ServerConfig};
+    use rmcp::service::RequestContext;
+    use rmcp::transport::streamable_http_server::{
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+    };
+    use rmcp::{ErrorData, RoleServer, ServerHandler};
+
+    #[derive(Clone)]
+    struct AppWithDifferentTools;
+    impl ServerHandler for AppWithDifferentTools {
+        fn get_info(&self) -> ServerConfig {
+            mcp::server::info()
+        }
+        async fn list_tools(
+            &self,
+            _: Option<PaginatedRequestParams>,
+            _: RequestContext<RoleServer>,
+        ) -> Result<ListToolsResult, ErrorData> {
+            Ok(ListToolsResult::with_all_items(vec![
+                mcp::server::tool_list().remove(0),
+            ]))
+        }
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let service: StreamableHttpService<AppWithDifferentTools, LocalSessionManager> =
+        StreamableHttpService::new(
+            || Ok(AppWithDifferentTools),
+            Default::default(),
+            StreamableHttpServerConfig::default(),
+        );
+    let http = tokio::spawn(async move {
+        axum::serve(listener, axum::Router::new().nest_service("/mcp", service))
+            .await
+            .unwrap();
+    });
+    let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_sketch-rs-mcp"));
+    cmd.env("SKETCH_RS_MCP_PORT", port.to_string());
+    let client = ().serve(rmcp::transport::TokioChildProcess::new(cmd).unwrap()).await.unwrap();
+    let tools = client.list_all_tools().await.unwrap();
+    assert_eq!(
+        tools.len(),
+        1,
+        "use the app's catalogue, not the bridge's local list"
+    );
+    assert_eq!(tools[0].name, mcp::server::tool_list()[0].name);
+    client.cancel().await.unwrap();
+    http.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stdio_bridge_relays_to_the_app() {
     let (running, _worker) = spawn_app();
     let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_sketch-rs-mcp"));
