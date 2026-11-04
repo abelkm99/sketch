@@ -309,9 +309,9 @@ pub fn definitions() -> Vec<Value> {
              align-items, justify-content, flex-grow, flex-wrap) is the layout model; block \
              elements stack vertically. position:absolute with left/top is supported. No margin, \
              grid or tables.\n\
-             - Text: font-size, font-weight (≥600 = bold), font-style, color, line-height, \
-             letter-spacing, text-align, text-decoration; <b>/<i>/<u>/<s>/<span style> make rich \
-             text. Font family is always Inter.\n\
+             - Text: font-size, font-weight (bundled Inter 400/500/600/700), font-style, color, \
+             line-height, letter-spacing, text-align, text-decoration; <b>/<i>/<u>/<s>/<span style> \
+             make rich text. Inter and Noto Sans Mono (font-family:monospace) are bundled.\n\
              - Boxes: background(-color/-image: colors, linear/radial gradients, url()), border, \
              border-radius, opacity, overflow:hidden, mix-blend-mode, width/height (px, %, \
              fit-content).\n\
@@ -319,7 +319,8 @@ pub fn definitions() -> Vec<Value> {
              <svg> markup is imported as vector layers.\n\
              - layer-name=\"...\" names layers; <x-sketch-clone node-id=\"ID\" style=\"...\"/> \
              clones an existing node.\n\
-             Returns the ids of the created top-level layers and the styles that were ignored.",
+             Returns createdNodeIds for top-level layers (compatibility), plus created with \
+             every new layer's id, name and parent, and any ignored styles.",
             json!({
                 "html": {"type": "string", "description": "HTML to parse into layers."},
                 "targetNodeId": {"type": "string", "description": "Target node id, or \"root\" for the page."},

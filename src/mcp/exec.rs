@@ -2193,8 +2193,22 @@ fn write_html(ed: &mut Editor, a: &Args) -> ToolResult {
     if created.is_empty() && !warnings.is_empty() {
         return Err(warnings.join("; "));
     }
+    let doc = ed.page_doc(page);
+    let all: Vec<Value> = created
+        .iter()
+        .flat_map(|id| doc.subtree(*id))
+        .map(|id| {
+            let n = doc.get(id).unwrap();
+            json!({
+                "id": node_key(ed, page, id),
+                "name": n.name,
+                "parent": n.parent.map_or(ROOT.to_string(), |p| node_key(ed, page, p)),
+            })
+        })
+        .collect();
     let mut v = json!({
         "createdNodeIds": created.iter().map(|id| node_key(ed, page, *id)).collect::<Vec<_>>(),
+        "created": all,
         "pageId": ed.pages[page].id,
     });
     if let Some(t) = target {

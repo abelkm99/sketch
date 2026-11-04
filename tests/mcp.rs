@@ -349,6 +349,38 @@ fn editing_tools_update_move_duplicate_and_delete() {
 }
 
 #[test]
+fn write_html_returns_every_created_layer_with_name_and_parent() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Tree", "styles": {"width": 300, "height": 200}}),
+    );
+    let result = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+        "html": "<div layer-name='Card' style='display:flex;flex-direction:column'><div layer-name='Row' style='display:flex'><span layer-name='Label'>Hello</span></div></div>"}),
+    );
+    assert_eq!(
+        result["createdNodeIds"].as_array().unwrap().len(),
+        1,
+        "keep legacy top-level list"
+    );
+    let created = result["created"]
+        .as_array()
+        .expect("list all created nodes");
+    assert_eq!(created.len(), 3, "card, row and text");
+    assert_eq!(created[0]["id"], result["createdNodeIds"][0]);
+    assert_eq!(created[0]["parent"], artboard["id"]);
+    assert_eq!(created[0]["name"], "Card");
+    assert_eq!(created[1]["parent"], created[0]["id"]);
+    assert_eq!(created[1]["name"], "Row");
+    assert_eq!(created[2]["parent"], created[1]["id"]);
+    assert_eq!(created[2]["name"], "Label");
+}
+
+#[test]
 fn replacing_text_clears_old_runs_and_html_rebuilds_them() {
     let mut h = host();
     let artboard = call(
