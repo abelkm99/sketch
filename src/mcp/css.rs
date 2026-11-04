@@ -839,9 +839,8 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
                 _ => false,
             },
             "flexShrink" | "flexBasis" | "boxSizing" | "minWidth" | "minHeight" | "maxWidth"
-            | "maxHeight" | "zIndex" | "cursor" | "whiteSpace" | "fontFamily" | "wordBreak"
-            | "overflowWrap" => {
-                // Accepted without an equivalent; harmless. fontFamily: Inter is the only face.
+            | "maxHeight" | "zIndex" | "cursor" | "whiteSpace" | "wordBreak" | "overflowWrap" => {
+                // Accepted without an equivalent; harmless.
                 !matches!(
                     k.as_str(),
                     "minWidth" | "minHeight" | "maxWidth" | "maxHeight"
@@ -892,13 +891,28 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
                 None => false,
             },
             "color" => true, // inherited by text children; meaningless on boxes
+            "fontFamily" if is_text => {
+                n.text_style.family = lower
+                    .split(',')
+                    .find_map(|f| match f.trim().trim_matches(['\'', '"']) {
+                        "inter" | "sans-serif" => Some(crate::model::FontFamily::Inter),
+                        "monospace" | "noto sans mono" | "notosansmono" => {
+                            Some(crate::model::FontFamily::NotoSansMono)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(crate::model::FontFamily::Inter);
+                true
+            }
+            "fontFamily" => true, // inherited by text descendants
             "fontWeight" if is_text => {
-                let w = match lower.as_str() {
+                let w: f64 = match lower.as_str() {
                     "bold" | "bolder" => 700.0,
                     "normal" | "lighter" => 400.0,
                     _ => v.parse().unwrap_or(400.0),
                 };
                 n.text_style.bold = w >= 600.0;
+                n.text_style.weight = Some(w.clamp(1.0, 1000.0).round() as u16);
                 true
             }
             "fontStyle" if is_text => {
@@ -1316,11 +1330,21 @@ pub fn computed(n: &Node, parent_layout: Option<&AutoLayout>, is_root: bool) -> 
         NodeKind::Text {
             font_size, align, ..
         } => {
-            put("fontFamily", "Inter".into());
+            put(
+                "fontFamily",
+                match n.text_style.family {
+                    crate::model::FontFamily::Inter => "Inter",
+                    crate::model::FontFamily::NotoSansMono => "Noto Sans Mono",
+                }
+                .into(),
+            );
             put("fontSize", px(*font_size));
             put(
                 "fontWeight",
-                if n.text_style.bold { "700" } else { "400" }.into(),
+                n.text_style
+                    .weight
+                    .unwrap_or(if n.text_style.bold { 700 } else { 400 })
+                    .to_string(),
             );
             if n.text_style.italic {
                 put("fontStyle", "italic".into());

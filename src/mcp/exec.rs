@@ -841,18 +841,24 @@ fn font_info(a: &Args) -> ToolResult {
         .iter()
         .map(|f| {
             let inter = f.trim().eq_ignore_ascii_case("inter");
+            let mono = f.trim().eq_ignore_ascii_case("monospace")
+                || f.trim().eq_ignore_ascii_case("noto sans mono");
             json!({
                 "family": f,
-                "available": inter,
+                "available": inter || mono,
                 "styles": if inter { json!([
-                    {"weight": 400, "style": "normal"}, {"weight": 700, "style": "normal"},
-                    {"weight": 400, "style": "italic"}, {"weight": 700, "style": "italic"}]) } else { json!([]) },
-                "note": if inter { "" } else { "not available; text renders in Inter" },
+                    {"weight": 400, "style": "normal"}, {"weight": 500, "style": "normal"},
+                    {"weight": 600, "style": "normal"}, {"weight": 700, "style": "normal"},
+                    {"weight": 400, "style": "italic"}, {"weight": 700, "style": "italic"}]) }
+                    else if mono { json!([
+                        {"weight": 400, "style": "normal"}, {"weight": 700, "style": "normal"}]) }
+                    else { json!([]) },
+                "note": if inter || mono { "" } else { "not available; text renders in Inter" },
             })
         })
         .collect();
     text(
-        json!({"families": fams, "weights": "fontWeight ≥ 600 renders bold, below renders regular"}),
+        json!({"families": fams, "weights": "Bundled Inter 400/500/600/700 (italic: 400/700); other weights use the nearest available face"}),
     )
 }
 

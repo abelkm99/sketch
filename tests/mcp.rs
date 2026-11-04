@@ -477,6 +477,95 @@ fn screenshot_returns_png() {
 }
 
 #[test]
+fn monospace_family_and_missing_glyph_fallback() {
+    use sketch_rs::model::TextAlign;
+    let fallback = sketch_rs::text::layout("▾", 16.0, None, TextAlign::Left);
+    assert_ne!(
+        fallback.glyphs[0].face, 0,
+        "missing glyph must use a fallback, not '?' in Inter"
+    );
+    assert!(sketch_rs::text::face_of(0).glyph_index('▾').is_none());
+    assert!(
+        sketch_rs::text::face_of(fallback.glyphs[0].face)
+            .glyph_index('▾')
+            .is_some()
+    );
+    assert!(
+        !sketch_rs::text::glyph_path(
+            fallback.glyphs[0].face,
+            fallback.glyphs[0].gid,
+            sketch_rs::geom::v2(0.0, 0.0),
+            16.0
+        )
+        .is_empty()
+    );
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Fonts", "styles": {"width": 300, "height": 300}}),
+    );
+    let result = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+               "html": "<span style='font-family:monospace'>iW</span><span style='font-family:monospace;font-weight:700'>iW</span>"}),
+    );
+    for (i, face) in [6, 7].into_iter().enumerate() {
+        let id = &result["createdNodeIds"][i];
+        let n = h.ed.doc.get(num(id)).unwrap();
+        let layout = sketch_rs::text::layout_node(n).unwrap();
+        assert!(layout.glyphs.iter().all(|g| g.face == face));
+        assert!((layout.glyphs[0].advance - layout.glyphs[1].advance).abs() < 0.001);
+        let style: sketch_rs::model::TextStyle =
+            serde_json::from_value(serde_json::to_value(&n.text_style).unwrap()).unwrap();
+        assert_eq!(style, n.text_style);
+        let styles = call(&mut h, "get_computed_styles", json!({"nodeIds": [id]}));
+        assert_eq!(styles[id.as_str().unwrap()]["fontFamily"], "Noto Sans Mono");
+    }
+}
+
+#[test]
+fn font_weights_use_bundled_medium_and_semibold() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Weights", "styles": {"width": 300, "height": 300}}),
+    );
+    let result = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+               "html": "<span style='font-weight:400'>A</span><span style='font-weight:500'>A</span><span style='font-weight:600'>A</span><span style='font-weight:700'>A</span>"}),
+    );
+    for (i, expected) in [0, 4, 5, 1].into_iter().enumerate() {
+        let id = &result["createdNodeIds"][i];
+        let n = h.ed.doc.get(num(id)).unwrap();
+        let layout = sketch_rs::text::layout_node(n).unwrap();
+        assert_eq!(layout.glyphs[0].face, expected, "weight {}", (i + 4) * 100);
+        let styles = call(&mut h, "get_computed_styles", json!({"nodeIds": [id]}));
+        assert_eq!(
+            styles[id.as_str().unwrap()]["fontWeight"],
+            format!("{}", (i + 4) * 100)
+        );
+    }
+    let old_style: sketch_rs::model::TextStyle = serde_json::from_str(r#"{"bold":true}"#).unwrap();
+    let legacy = sketch_rs::text::layout_rich(
+        "A",
+        16.0,
+        sketch_rs::model::Color::INK,
+        &old_style,
+        None,
+        sketch_rs::model::TextAlign::Left,
+    );
+    assert_eq!(
+        legacy.glyphs[0].face, 1,
+        "old saved bold text still renders bold"
+    );
+}
+
+#[test]
 fn border_bottom_only_renders_on_bottom_and_can_be_removed() {
     use sketch_rs::render::draw::{self, DrawOp};
     use sketch_rs::vector::Seg;

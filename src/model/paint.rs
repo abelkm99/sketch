@@ -277,11 +277,29 @@ pub struct TextSpan {
     pub strike: Option<bool>,
 }
 
+/// Bundled faces available to the vector text renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FontFamily {
+    #[default]
+    Inter,
+    NotoSansMono,
+}
+
+fn default_family(family: &FontFamily) -> bool {
+    *family == FontFamily::Inter
+}
+
 /// Node-wide text attributes beyond size and alignment.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct TextStyle {
     pub bold: bool,
+    /// Explicit CSS font weight; None preserves the legacy bold flag for old documents.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weight: Option<u16>,
+    #[serde(skip_serializing_if = "default_family")]
+    pub family: FontFamily,
     pub italic: bool,
     /// Line height as a multiple of the font size (None = font default).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -302,6 +320,8 @@ impl TextStyle {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CharStyle {
     pub bold: bool,
+    pub weight: u16,
+    pub family: FontFamily,
     pub italic: bool,
     pub size: f64,
     pub color: Color,
@@ -313,6 +333,8 @@ impl TextStyle {
     pub fn char_style(&self, i: usize, size: f64, color: Color) -> CharStyle {
         let mut s = CharStyle {
             bold: self.bold,
+            weight: self.weight.unwrap_or(if self.bold { 700 } else { 400 }),
+            family: self.family,
             italic: self.italic,
             size,
             color,
@@ -323,6 +345,7 @@ impl TextStyle {
             if i >= sp.start && i < sp.end {
                 if let Some(b) = sp.bold {
                     s.bold = b;
+                    s.weight = if b { 700 } else { 400 };
                 }
                 if let Some(b) = sp.italic {
                     s.italic = b;
