@@ -301,6 +301,10 @@ pub struct TextStyle {
     #[serde(skip_serializing_if = "default_family")]
     pub family: FontFamily,
     pub italic: bool,
+    /// Text layout and box overflow for CSS single-line ellipsis.
+    pub no_wrap: bool,
+    pub overflow_hidden: bool,
+    pub ellipsis: bool,
     /// Line height as a multiple of the font size (None = font default).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line_height: Option<f64>,
@@ -565,17 +569,26 @@ pub struct Constraints {
 }
 
 /// Per-node layout participation (as a child of an auto-layout or constrained frame).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LayoutChild {
     /// Horizontal and vertical sizing.
     pub sizing: [Sizing; 2],
+    /// CSS min/max constraints (width, height), in document pixels.
+    pub min_size: [Option<f64>; 2],
+    pub max_size: [Option<f64>; 2],
     /// Ignore auto layout (positioned by constraints instead).
     pub absolute: bool,
     pub constraints: Constraints,
 }
 
 impl LayoutChild {
+    pub fn constrain(&self, axis: usize, size: f64) -> f64 {
+        let max = self.max_size[axis].unwrap_or(f64::INFINITY);
+        let min = self.min_size[axis].unwrap_or(0.0);
+        size.min(max).max(min) // CSS min wins over max if they conflict.
+    }
+
     pub fn is_default(&self) -> bool {
         *self == LayoutChild::default()
     }

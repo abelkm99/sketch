@@ -349,6 +349,66 @@ fn editing_tools_update_move_duplicate_and_delete() {
 }
 
 #[test]
+fn nowrap_text_with_ellipsis_stays_inside_its_box() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Ellipsis", "styles": {"width": 300, "height": 100}}),
+    );
+    let result = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+        "html": "<span style='width:80px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>A very long delivery note</span>"}),
+    );
+    assert_eq!(result["createdNodeIds"].as_array().unwrap().len(), 1);
+    assert!(result.get("ignoredStyles").is_none(), "{result}");
+    let id = &result["createdNodeIds"][0];
+    let n = h.ed.doc.get(num(id)).unwrap();
+    assert_eq!(n.rect.w, 80.0);
+    let layout = sketch_rs::text::layout_node(n).unwrap();
+    assert_eq!(layout.lines.len(), 1);
+    let last = layout.glyphs.last().unwrap();
+    assert_eq!(
+        last.gid,
+        sketch_rs::text::face_of(last.face)
+            .glyph_index('…')
+            .unwrap()
+            .0
+    );
+    assert!(last.x + last.advance <= n.rect.w + 0.01);
+    let styles = call(&mut h, "get_computed_styles", json!({"nodeIds": [id]}));
+    assert_eq!(styles[id.as_str().unwrap()]["overflow"], "hidden");
+    assert_eq!(styles[id.as_str().unwrap()]["textOverflow"], "ellipsis");
+}
+
+#[test]
+fn min_max_width_constrain_hug_and_fill_layout() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Sizes", "styles": {"width": 460, "height": 250}}),
+    );
+    let result = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+        "html": "<div layer-name='Max' style='display:flex;width:100%;max-width:220px'><span>Large</span></div><div layer-name='Min' style='display:flex;flex-direction:column;width:fit-content;min-width:120px'><span>Small</span></div><span style='max-width:80px'>A long piece of text that must wrap</span>"}),
+    );
+    let ids = result["createdNodeIds"].as_array().unwrap();
+    assert_eq!(h.ed.doc.get(num(&ids[0])).unwrap().rect.w, 220.0);
+    assert_eq!(h.ed.doc.get(num(&ids[1])).unwrap().rect.w, 120.0);
+    let styles = call(&mut h, "get_computed_styles", json!({"nodeIds": ids}));
+    assert_eq!(styles[ids[0].as_str().unwrap()]["maxWidth"], "220px");
+    assert_eq!(styles[ids[1].as_str().unwrap()]["minWidth"], "120px");
+    let text_node = h.ed.doc.get(num(&ids[2])).unwrap();
+    assert!(text_node.rect.w <= 80.0);
+    assert!(sketch_rs::text::layout_node(text_node).unwrap().lines.len() > 1);
+}
+
+#[test]
 fn write_html_returns_every_created_layer_with_name_and_parent() {
     let mut h = host();
     let artboard = call(

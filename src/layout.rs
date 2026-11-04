@@ -159,6 +159,8 @@ pub fn layout_frame(tx: &mut Tx, id: NodeId) -> bool {
             }
         }
     }
+    rect.w = n.layout_child.constrain(0, rect.w);
+    rect.h = n.layout_child.constrain(1, rect.h);
     if rect != n.rect {
         tx.node_mut(id).unwrap().rect = rect;
     }
@@ -217,6 +219,14 @@ fn arrange(tx: &mut Tx, id: NodeId, l: &AutoLayout, rect: Rect, ma: usize, ca: u
                 sizes[*i] = share;
             }
         }
+        for (i, k) in line.iter().enumerate() {
+            sizes[i] = tx
+                .doc()
+                .get(*k)
+                .unwrap()
+                .layout_child
+                .constrain(ma, sizes[i]);
+        }
         let used: f64 = sizes.iter().sum::<f64>() + gap * line.len().saturating_sub(1) as f64;
         let free = inner_m - used;
         let (mut cursor, gap) = if l.gap_auto && line.len() > 1 {
@@ -242,10 +252,13 @@ fn arrange(tx: &mut Tx, id: NodeId, l: &AutoLayout, rect: Rect, ma: usize, ca: u
         for (i, k) in line.iter().enumerate() {
             let kn = tx.doc().get(*k).unwrap();
             let mut r = kn.rect;
-            let cs = match kn.layout_child.sizing[ca] {
-                Sizing::Fill => line_cross.max(0.0),
-                _ => get(&r, ca).1,
-            };
+            let cs = kn.layout_child.constrain(
+                ca,
+                match kn.layout_child.sizing[ca] {
+                    Sizing::Fill => line_cross.max(0.0),
+                    _ => get(&r, ca).1,
+                },
+            );
             let cpos = match l.align_cross {
                 Align::Start => cross_cursor,
                 Align::Center => cross_cursor + (line_cross - cs) * 0.5,

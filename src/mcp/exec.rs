@@ -1194,16 +1194,36 @@ fn fit_text(tx: &mut Tx, id: NodeId, keep_height: bool) {
     let Some(l) = crate::text::layout_node(n) else {
         return;
     };
-    let w = if auto_width {
-        l.width.max(1.0)
+    let w = n.layout_child.constrain(
+        0,
+        if auto_width {
+            l.width.max(1.0)
+        } else {
+            n.rect.w
+        },
+    );
+    // An intrinsic text line capped by max-width needs a fixed width to wrap on remeasure.
+    let capped = auto_width && w < l.width - 1e-9;
+    let h = if keep_height {
+        n.rect.h
+    } else if capped {
+        let mut measured = n.clone();
+        measured.rect.w = w;
+        if let NodeKind::Text { auto_width, .. } = &mut measured.kind {
+            *auto_width = false;
+        }
+        crate::text::layout_node(&measured).map_or(l.height, |m| m.height)
     } else {
-        n.rect.w
+        l.height
     };
-    let h = if keep_height { n.rect.h } else { l.height };
+    let h = n.layout_child.constrain(1, h);
     if (n.rect.w - w).abs() > 1e-9 || (n.rect.h - h).abs() > 1e-9 {
         let n = tx.node_mut(id).unwrap();
         n.rect.w = w;
         n.rect.h = h;
+        if capped && let NodeKind::Text { auto_width, .. } = &mut n.kind {
+            *auto_width = false;
+        }
     }
 }
 

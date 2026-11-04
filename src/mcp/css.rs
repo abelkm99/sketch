@@ -639,6 +639,24 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
                 set_size(n, 1, v, ctx, &mut a, k);
                 true
             }
+            "minWidth" | "maxWidth" | "minHeight" | "maxHeight" => {
+                let axis = usize::from(k.ends_with("Height"));
+                let size = length(v, fs).or_else(|| {
+                    percent(v)
+                        .zip(ctx.parent_size)
+                        .map(|(p, s)| p * if axis == 0 { s.0 } else { s.1 })
+                });
+                if let Some(size) = size.filter(|x| x.is_finite() && *x >= 0.0) {
+                    if k.starts_with("min") {
+                        n.layout_child.min_size[axis] = Some(size);
+                    } else {
+                        n.layout_child.max_size[axis] = Some(size);
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
             "left" | "x" => match length(v, fs) {
                 Some(x) => {
                     n.rect.x = x;
@@ -838,13 +856,25 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
                 }
                 _ => false,
             },
-            "flexShrink" | "flexBasis" | "boxSizing" | "minWidth" | "minHeight" | "maxWidth"
-            | "maxHeight" | "zIndex" | "cursor" | "whiteSpace" | "wordBreak" | "overflowWrap" => {
+            "flexShrink" | "flexBasis" | "boxSizing" | "zIndex" | "cursor" | "wordBreak"
+            | "overflowWrap" => {
                 // Accepted without an equivalent; harmless.
                 !matches!(
                     k.as_str(),
                     "minWidth" | "minHeight" | "maxWidth" | "maxHeight"
                 )
+            }
+            "overflow" if is_text => {
+                n.text_style.overflow_hidden = matches!(lower.as_str(), "hidden" | "clip");
+                true
+            }
+            "textOverflow" if is_text => {
+                n.text_style.ellipsis = lower == "ellipsis";
+                true
+            }
+            "whiteSpace" if is_text => {
+                n.text_style.no_wrap = lower == "nowrap";
+                true
             }
             "overflow" if n.is_frame() => {
                 if let NodeKind::Frame { clip } = &mut n.kind {
@@ -1124,6 +1154,8 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
             a.ignored.push(k.clone());
         }
     }
+    n.rect.w = n.layout_child.constrain(0, n.rect.w);
+    n.rect.h = n.layout_child.constrain(1, n.rect.h);
     a
 }
 
@@ -1261,6 +1293,15 @@ pub fn computed(n: &Node, parent_layout: Option<&AutoLayout>, is_root: bool) -> 
         _ => px(v),
     };
     if let NodeKind::Text { auto_width, .. } = &n.kind {
+        if n.text_style.no_wrap {
+            put("whiteSpace", "nowrap".into());
+        }
+        if n.text_style.overflow_hidden {
+            put("overflow", "hidden".into());
+        }
+        if n.text_style.ellipsis {
+            put("textOverflow", "ellipsis".into());
+        }
         if *auto_width {
             put("width", "fit-content".into());
         } else {
@@ -1270,6 +1311,14 @@ pub fn computed(n: &Node, parent_layout: Option<&AutoLayout>, is_root: bool) -> 
     } else {
         put("width", size_css(0, n.rect.w));
         put("height", size_css(1, n.rect.h));
+    }
+    for axis in [0, 1] {
+        if let Some(min) = n.layout_child.min_size[axis] {
+            put(if axis == 0 { "minWidth" } else { "minHeight" }, px(min));
+        }
+        if let Some(max) = n.layout_child.max_size[axis] {
+            put(if axis == 0 { "maxWidth" } else { "maxHeight" }, px(max));
+        }
     }
     if let Some(pl) = parent_layout
         && in_flow

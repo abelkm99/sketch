@@ -536,14 +536,67 @@ pub fn layout_node(n: &crate::model::Node) -> Option<TextLayout> {
         .fills
         .last()
         .map_or(Color::INK, |p| p.preview_color());
-    Some(layout_rich(
+    let limit = (!auto_width).then_some(n.rect.w);
+    let mut layout = layout_rich(
         text,
         *font_size,
         color,
         &n.text_style,
-        (!auto_width).then_some(n.rect.w),
+        if n.text_style.no_wrap { None } else { limit },
         *align,
-    ))
+    );
+    if n.text_style.overflow_hidden
+        && let Some(width) = limit
+    {
+        clip_text_lines(
+            &mut layout,
+            width,
+            n.text_style.ellipsis && n.text_style.no_wrap,
+        );
+    }
+    Some(layout)
+}
+
+/// Keep whole glyph outlines inside a text box. On a no-wrap line, replace the
+/// overflowing tail with an ellipsis (without changing the underlying editable text).
+fn clip_text_lines(layout: &mut TextLayout, width: f64, ellipsis: bool) {
+    let mut visible = Vec::new();
+    for line in &mut layout.lines {
+        let mut glyphs: Vec<PlacedGlyph> = layout
+            .glyphs
+            .iter()
+            .filter(|g| g.char_index >= line.start && g.char_index < line.end)
+            .copied()
+            .collect();
+        let mut tail = None;
+        if line.width > width + 1e-9 && ellipsis && !glyphs.is_empty() {
+            let reference = glyphs[0];
+            let (face, gid, advance) = advance_in(reference.face, '…', reference.size);
+            let budget = (width - advance).max(0.0);
+            glyphs.retain(|g| g.x + g.advance <= budget + 1e-9);
+            let x = glyphs.last().map_or(0.0, |g| g.x + g.advance);
+            if x + advance <= width + 1e-9 {
+                tail = Some(PlacedGlyph {
+                    gid,
+                    face,
+                    size: reference.size,
+                    color: glyphs.last().unwrap_or(&reference).color,
+                    x,
+                    baseline: reference.baseline,
+                    advance,
+                    char_index: line.end.saturating_sub(1),
+                    underline: false,
+                    strike: false,
+                });
+            }
+        }
+        glyphs.retain(|g| g.x + g.advance <= width + 1e-9);
+        visible.extend(glyphs);
+        visible.extend(tail);
+        line.width = line.width.min(width);
+    }
+    layout.glyphs = visible;
+    layout.width = layout.width.min(width);
 }
 
 #[cfg(test)]
