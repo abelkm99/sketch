@@ -89,6 +89,9 @@ pub struct BoxShadow {
     pub blur: f64,
     pub spread: f64,
     pub color: Color,
+    /// Drawn inside the box, over its fill (CSS `inset`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inset: bool,
 }
 
 /// An inside box border on one edge (top, right, bottom or left).

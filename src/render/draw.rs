@@ -12,6 +12,9 @@ use crate::model::{
 };
 use crate::text::{self, FaceId};
 use crate::vector::{self, VPath};
+use i_overlay::core::fill_rule::FillRule as OvFill;
+use i_overlay::core::overlay_rule::OverlayRule;
+use i_overlay::float::single::SingleFloatOverlay;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PaintSpec {
@@ -227,7 +230,7 @@ fn sorted(stops: &[Stop]) -> Vec<Stop> {
 pub fn node_draw(n: &Node, wr: Rect, opacity: f64) -> NodeDraw {
     let mut ops = Vec::new();
     if matches!(n.kind, NodeKind::Frame { .. } | NodeKind::Rect) {
-        box_shadows(n, wr, opacity, &mut ops);
+        box_shadows(n, wr, opacity, false, &mut ops);
     }
     if let Some(r) = n.style.rough {
         ops.extend(super::rough::node_ops(n, wr, opacity, &r));
@@ -326,6 +329,9 @@ pub fn node_draw(n: &Node, wr: Rect, opacity: f64) -> NodeDraw {
                     }
                 }
             }
+            if matches!(n.kind, NodeKind::Frame { .. } | NodeKind::Rect) {
+                box_shadows(n, wr, opacity, true, &mut ops);
+            }
             if let Some(c) = n.style.stroke
                 && n.style.stroke_width > 0.0
                 && let Some(sp) = stroke_path(n, wr)
@@ -354,8 +360,11 @@ pub fn node_draw(n: &Node, wr: Rect, opacity: f64) -> NodeDraw {
 /// a soft edge in GPU, SVG and PDF without depending on raster-only filters.
 /// ponytail: no true Gaussian blur and the shadow also shows under a translucent fill;
 /// a blur pass in the GPU backend would fix both.
-fn box_shadows(n: &Node, wr: Rect, opacity: f64, ops: &mut Vec<DrawOp>) {
-    for s in &n.style.shadows {
+/// `inset` picks the inner shadows, drawn as rings inside the box over its fill.
+fn box_shadows(n: &Node, wr: Rect, opacity: f64, inset: bool, ops: &mut Vec<DrawOp>) {
+    let outline =
+        (inset).then(|| shape_contours(&vector::rounded_rect(wr, n.style.corner_radii())));
+    for s in n.style.shadows.iter().filter(|s| s.inset == inset) {
         let base = wr.translate(v2(s.x, s.y));
         // About one layer per px of blur keeps bands invisible.
         let steps = if s.blur > 0.0 {
@@ -375,6 +384,35 @@ fn box_shadows(n: &Node, wr: Rect, opacity: f64, ops: &mut Vec<DrawOp>) {
             } else {
                 s.spread - s.blur * 0.5 + s.blur * (i as f64 + 0.5) / steps as f64
             };
+            if let Some(outline) = &outline {
+                // CSS inset: the box minus its shifted copy, shrunk by spread (and blur).
+                let hole = base.inflate(-radius);
+                let path = if hole.w <= 0.0 || hole.h <= 0.0 {
+                    vector::rounded_rect(wr, n.style.corner_radii())
+                } else {
+                    let hole = vector::rounded_rect(
+                        hole,
+                        n.style.corner_radii().map(|x| (x - radius).max(0.0)),
+                    );
+                    let ring = outline.overlay(
+                        &shape_contours(&hole),
+                        OverlayRule::Difference,
+                        OvFill::NonZero,
+                    );
+                    let mut path = VPath::new();
+                    for c in ring.iter().flatten() {
+                        let pts: Vec<V2> = c.iter().map(|p| v2(p[0], p[1])).collect();
+                        path.append(&VPath::polyline(&pts, true));
+                    }
+                    path
+                };
+                ops.push(DrawOp::Fill {
+                    path,
+                    paint: PaintSpec::Solid(rgba(color, layer)),
+                    even_odd: true,
+                });
+                continue;
+            }
             let r = base.inflate(radius);
             if r.w <= 0.0 || r.h <= 0.0 {
                 continue;
@@ -389,6 +427,14 @@ fn box_shadows(n: &Node, wr: Rect, opacity: f64, ops: &mut Vec<DrawOp>) {
             });
         }
     }
+}
+
+fn shape_contours(p: &VPath) -> Vec<Vec<[f64; 2]>> {
+    p.flatten(0.1)
+        .into_iter()
+        .filter(|p| p.pts.len() >= 3)
+        .map(|p| p.pts.iter().map(|q| [q.x, q.y]).collect())
+        .collect()
 }
 
 /// Inside strokes along selected box edges, shared by GPU, SVG and PDF backends.
@@ -561,7 +607,7 @@ pub fn draw_bounds(n: &Node, wr: Rect) -> Rect {
     }
     let mut bounds = wr.inflate(pad);
     if matches!(n.kind, NodeKind::Frame { .. } | NodeKind::Rect) {
-        for s in &n.style.shadows {
+        for s in n.style.shadows.iter().filter(|s| !s.inset) {
             let outer = wr.translate(v2(s.x, s.y)).inflate(s.spread + s.blur);
             if outer.w > 0.0 && outer.h > 0.0 {
                 bounds = bounds.union(&outer);

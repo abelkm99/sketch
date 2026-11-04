@@ -1740,3 +1740,58 @@ fn layered_shadow_composites_to_its_css_alpha() {
     let covered = 1.0 - alphas.iter().map(|a| 1.0 - a).product::<f32>();
     assert!((covered - 0.5).abs() < 0.01, "{covered}");
 }
+
+#[test]
+fn inset_shadow_draws_a_ring_inside_the_box() {
+    let mut h = host();
+    let ab = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Inset", "styles": {"width": "200px", "height": "200px", "backgroundColor": "#ffffff"}}),
+    );
+    let created = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": ab["id"], "mode": "insert-children",
+        "html": "<div style='position:absolute;left:50px;top:50px;width:100px;height:100px;background:#ffffff;border-radius:16px;box-shadow:inset 0 0 0 10px #ff0000, 0 4px 8px #00000040'></div>"}),
+    );
+    assert!(created.get("ignoredStyles").is_none(), "{created}");
+    let id = &created["createdNodeIds"][0];
+    let n = h.ed.doc.get(num(id)).unwrap();
+    assert!(n.style.shadows[0].inset && !n.style.shadows[1].inset);
+    // Only the outer shadow grows the drawn bounds.
+    let wr = h.ed.doc.world_rect(num(id)).unwrap();
+    let b = sketch_rs::render::draw::draw_bounds(n, wr);
+    assert!(b.y >= wr.y - 4.0 && b.bottom() > wr.bottom() + 4.0, "{b:?}");
+    let styles = call(&mut h, "get_computed_styles", json!({"nodeIds": [id]}));
+    assert!(
+        styles[id.as_str().unwrap()]["boxShadow"]
+            .as_str()
+            .unwrap()
+            .starts_with("inset 0px 0px 0px 10px"),
+        "{styles}"
+    );
+    if sketch_rs::render::gpu::Headless::new().is_err() {
+        eprintln!("no GPU adapter; skipping pixels");
+        return;
+    }
+    let outs = exec::call(
+        &mut h,
+        "get_screenshot",
+        &json!({"nodeId": ab["id"], "scale": 1}),
+    )
+    .unwrap();
+    let Out::Image { data, .. } = &outs[0] else {
+        panic!()
+    };
+    let img = image::load_from_memory(data).unwrap().to_rgba8();
+    let ring = img.get_pixel(55, 100).0; // 5px inside the left edge
+    let middle = img.get_pixel(100, 100).0;
+    let outside_corner = img.get_pixel(52, 52).0; // cut off by the 16px radius
+    assert!(ring[0] > 200 && ring[1] < 60, "ring missing: {ring:?}");
+    assert!(middle[1] > 200, "middle should stay white: {middle:?}");
+    assert!(
+        outside_corner[1] > 150,
+        "ring leaks past the rounded corner: {outside_corner:?}"
+    );
+}

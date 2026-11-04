@@ -1312,11 +1312,11 @@ fn parse_shadows(value: &str, fs: f64) -> Option<Vec<crate::model::node::BoxShad
     for layer in split_top(value, ',') {
         let mut nums = Vec::new();
         let mut paint = None;
+        let mut inset = false;
         for token in split_ws(&layer) {
             if token.eq_ignore_ascii_case("inset") {
-                return None;
-            }
-            if let Some(c) = color(&token) {
+                inset = true;
+            } else if let Some(c) = color(&token) {
                 paint = Some(c);
             } else {
                 nums.push(length(&token, fs)?);
@@ -1331,6 +1331,7 @@ fn parse_shadows(value: &str, fs: f64) -> Option<Vec<crate::model::node::BoxShad
             blur: nums.get(2).copied().unwrap_or(0.0).max(0.0),
             spread: nums.get(3).copied().unwrap_or(0.0),
             color: paint.unwrap_or(Color::BLACK),
+            inset,
         });
     }
     Some(out)
@@ -1646,7 +1647,8 @@ pub fn computed(n: &Node, parent_layout: Option<&AutoLayout>, is_root: bool) -> 
             .iter()
             .map(|s| {
                 format!(
-                    "{} {} {} {} {}",
+                    "{}{} {} {} {} {}",
+                    if s.inset { "inset " } else { "" },
                     px(s.x),
                     px(s.y),
                     px(s.blur),

@@ -534,9 +534,9 @@ justify-content, align-items, align-self, flex-grow, overflow, background, backg
 background-image (url(), linear-gradient(), radial-gradient()), background-size/object-fit,
 border, border-color/width/style, border-radius (1–4 values), opacity, mix-blend-mode, color,
 font-size, font-weight, font-style, line-height, letter-spacing, text-align, text-decoration,
-box-shadow (outer, comma-separated layers; inset is ignored), transform: rotate() and rotate
+box-shadow (comma-separated layers, outer and inset), transform: rotate() and rotate
 (the layer and its children turn when drawn; layout keeps the unrotated box, like CSS).
-Ignored (reported back): grid, inset shadows, other transforms (translate, scale), filters,
+Ignored (reported back): grid, other transforms (translate, scale), filters,
 transitions.";
 
 pub const GUIDE_WHITEBOARD: &str = "\
