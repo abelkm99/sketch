@@ -426,14 +426,22 @@ impl PageWriter<'_> {
         }
         let wr = doc.world_rect(id).unwrap();
         let op = opacity * n.style.opacity;
-        let d = draw::node_draw(n, wr, op);
+        let xf = draw::world_xf(doc, id);
+        let mut d = draw::node_draw(n, wr, op);
+        if let Some(x) = &xf {
+            d.ops = draw::transform_ops(d.ops, x);
+        }
         self.ops(&d.ops, d.blend);
         if n.children.is_empty() {
             return;
         }
         let clip = matches!(n.kind, NodeKind::Frame { clip: true });
         if clip {
-            let p = self.emit_path(&draw::shape_path(n, wr).unwrap_or_default());
+            let mut path = draw::shape_path(n, wr).unwrap_or_default();
+            if let Some(x) = &xf {
+                path = path.map(|p| x.apply(p));
+            }
+            let p = self.emit_path(&path);
             let _ = writeln!(self.out, "q {p}W n");
         }
         for c in &n.children {

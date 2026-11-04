@@ -1005,6 +1005,20 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
                 true
             }
             "backgroundPosition" | "backgroundRepeat" | "objectPosition" => true,
+            "transform" | "rotate" => match parse_rotation(v, k == "rotate") {
+                Some(deg) => {
+                    n.style.rotation = deg;
+                    true
+                }
+                None => false,
+            },
+            "boxShadow" if !is_text => match parse_shadows(v, fs) {
+                Some(shadows) => {
+                    n.style.shadows = shadows;
+                    true
+                }
+                None => false,
+            },
             "color" if is_text => match color(v) {
                 Some(c) => {
                     if matches!(n.kind, NodeKind::Sticky { .. }) {
@@ -1257,6 +1271,69 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
         l.border_box = true;
     }
     a
+}
+
+/// Degrees from `transform: rotate(-6deg)` / `none`, or the `rotate: 45deg` property.
+/// Other transform functions are not supported, so they reject the whole value.
+fn parse_rotation(value: &str, bare: bool) -> Option<f64> {
+    let v = value.trim().to_ascii_lowercase();
+    if v == "none" {
+        return Some(0.0);
+    }
+    let angle = |a: &str| {
+        let a = a.trim();
+        let (num, unit) = ["deg", "grad", "rad", "turn"]
+            .iter()
+            .find_map(|u| a.strip_suffix(u).map(|n| (n, *u)))?;
+        let x: f64 = num.trim().parse().ok()?;
+        let deg = match unit {
+            "deg" => x,
+            "grad" => x * 0.9,
+            "rad" => x.to_degrees(),
+            _ => x * 360.0,
+        };
+        deg.is_finite().then_some(deg)
+    };
+    if bare {
+        return angle(&v);
+    }
+    let mut total = 0.0;
+    for f in split_ws(&v) {
+        total += angle(f.strip_prefix("rotate(")?.strip_suffix(')')?)?;
+    }
+    Some(total)
+}
+
+fn parse_shadows(value: &str, fs: f64) -> Option<Vec<crate::model::node::BoxShadow>> {
+    if value.eq_ignore_ascii_case("none") {
+        return Some(Vec::new());
+    }
+    let mut out = Vec::new();
+    for layer in split_top(value, ',') {
+        let mut nums = Vec::new();
+        let mut paint = None;
+        for token in split_ws(&layer) {
+            if token.eq_ignore_ascii_case("inset") {
+                return None;
+            }
+            if let Some(c) = color(&token) {
+                paint = Some(c);
+            } else {
+                nums.push(length(&token, fs)?);
+            }
+        }
+        if nums.len() < 2 || nums.len() > 4 {
+            return None;
+        }
+        out.push(crate::model::node::BoxShadow {
+            x: nums[0],
+            y: nums[1],
+            blur: nums.get(2).copied().unwrap_or(0.0).max(0.0),
+            spread: nums.get(3).copied().unwrap_or(0.0),
+            color: paint.unwrap_or(Color::BLACK),
+        });
+    }
+    Some(out)
 }
 
 fn set_dash(n: &mut Node, style: &str) {
@@ -1559,6 +1636,27 @@ pub fn computed(n: &Node, parent_layout: Option<&AutoLayout>, is_root: bool) -> 
             }
         }
     }
+    if n.style.rotation != 0.0 {
+        put("transform", format!("rotate({}deg)", n.style.rotation));
+    }
+    if !n.style.shadows.is_empty() {
+        let shadows = n
+            .style
+            .shadows
+            .iter()
+            .map(|s| {
+                format!(
+                    "{} {} {} {} {}",
+                    px(s.x),
+                    px(s.y),
+                    px(s.blur),
+                    px(s.spread),
+                    color_css(s.color)
+                )
+            })
+            .collect::<Vec<_>>();
+        put("boxShadow", shadows.join(", "));
+    }
     if let Some(s) = n.style.stroke
         && n.style.stroke_width > 0.0
     {
@@ -1689,7 +1787,8 @@ mod tests {
         assert_eq!(n.style.stroke_width, 2.0);
         assert!(!n.style.dash.is_empty());
         assert_eq!(n.style.corner_radius, 12.0);
-        assert_eq!(a.ignored, vec!["boxShadow".to_string()]);
+        assert!(a.ignored.is_empty(), "{:?}", a.ignored);
+        assert_eq!(n.style.shadows.len(), 1);
         let back = computed(&n, None, true);
         assert_eq!(back["flexDirection"], "column");
         assert_eq!(back["borderRadius"], "12px");

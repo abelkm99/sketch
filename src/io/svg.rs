@@ -76,7 +76,7 @@ pub fn export_bounds(doc: &Document, roots: &[NodeId]) -> Option<Rect> {
             if clipped {
                 continue;
             }
-            rects.push(draw::draw_bounds(nd, wr));
+            rects.push(draw::turned(doc, id, draw::draw_bounds(nd, wr)));
         }
     }
     Rect::union_all(&rects).map(|r| {
@@ -323,13 +323,20 @@ impl Writer<'_> {
             "{ind}<g id=\"n{}\" data-name=\"{label}\"{aria}{blend}>",
             id.0
         );
-        let d = draw::node_draw(nd, wr, op);
+        let xf = draw::world_xf(doc, id);
+        let mut d = draw::node_draw(nd, wr, op);
+        if let Some(x) = &xf {
+            d.ops = draw::transform_ops(d.ops, x);
+        }
         self.ops(&d.ops, &format!("{ind}  "));
         if !nd.children.is_empty() {
             let clip = matches!(nd.kind, NodeKind::Frame { clip: true });
             if clip {
                 let cid = self.def_id("clip");
-                let path = draw::shape_path(nd, wr).unwrap_or_default();
+                let mut path = draw::shape_path(nd, wr).unwrap_or_default();
+                if let Some(x) = &xf {
+                    path = path.map(|p| x.apply(p));
+                }
                 let _ = write!(
                     self.defs,
                     "<clipPath id=\"{cid}\"><path d=\"{}\"/></clipPath>",

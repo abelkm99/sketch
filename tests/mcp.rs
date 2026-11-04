@@ -287,13 +287,11 @@ fn editing_tools_update_move_duplicate_and_delete() {
         json!({"updates": [{"nodeIds": [a.clone()], "styles": {"backgroundColor": "linear-gradient(90deg, red, blue)", "boxShadow": "0 1px 2px black", "sketch": true, "roughness": 2}}]}),
     );
     assert_eq!(up["updated"], 1);
-    assert_eq!(
-        up["ignoredStyles"][a.as_str().unwrap()],
-        json!(["boxShadow"])
-    );
+    assert!(up.get("ignoredStyles").is_none(), "{up}");
     let an = h.ed.doc.get(num(&a)).unwrap();
     assert!(matches!(an.style.fills[0], Paint::Linear { .. }));
     assert_eq!(an.style.rough.unwrap().roughness, 2.0);
+    assert_eq!(an.style.shadows.len(), 1);
 
     // Text edits refit the layer.
     let one = h.ed.doc.get(num(&a)).unwrap().children[0];
@@ -1595,4 +1593,150 @@ fn divider_stays_inside_the_border_of_a_rounded_box() {
     assert_eq!(d.rect.x, 2.0, "divider starts inside the left border");
     assert_eq!(d.rect.w, 196.0, "divider ends inside the right border");
     assert_eq!(b.rect.h, 85.0, "border adds to hug height");
+}
+
+#[test]
+fn box_shadows_render_outside_frame_in_all_vector_backends() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Shadows", "styles": {"width": 200, "height": 150}}),
+    );
+    let created = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+        "html": "<div style='width:60px;height:40px;background:#ffffff;box-shadow: 2px 4px 6px 1px #00000080'></div>"}),
+    );
+    assert!(created.get("ignoredStyles").is_none(), "{created}");
+    let id = num(&created["createdNodeIds"][0]);
+    let n = h.ed.doc.get(id).unwrap();
+    let wr = h.ed.doc.world_rect(id).unwrap();
+    assert!(!n.style.shadows.is_empty());
+    let ops = sketch_rs::render::draw::node_draw(n, wr, 1.0).ops;
+    assert!(ops.len() > 2, "soft shadow ops should precede the fill");
+    let bounds = sketch_rs::render::draw::draw_bounds(n, wr);
+    assert!(bounds.x < wr.x && bounds.y < wr.y && bounds.w > wr.w);
+    let serialized: sketch_rs::model::Style =
+        serde_json::from_value(serde_json::to_value(&n.style).unwrap()).unwrap();
+    assert_eq!(serialized, n.style);
+}
+
+#[test]
+fn css_rotate_turns_a_layer_and_its_children_when_drawn() {
+    let mut h = host();
+    let ab = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Turn", "styles": {"width": "200px", "height": "200px", "backgroundColor": "#ffffff"}}),
+    );
+    let created = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": ab["id"], "mode": "insert-children",
+        "html": "<div layer-name='Bar' style='position:absolute;left:50px;top:95px;width:100px;height:10px;background:#ff0000;transform:rotate(90deg)'><span style='font-size:8px'>Hi</span></div><div layer-name='Moved' style='transform:translateX(4px)'></div>"}),
+    );
+    // Only the unsupported translate is reported.
+    let ignored = created["ignoredStyles"].to_string();
+    assert!(
+        ignored.contains("transform") && created["created"].as_array().unwrap().len() == 3,
+        "{created}"
+    );
+    let find = |name: &str| {
+        let c = created["created"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap();
+        num(&c["id"])
+    };
+    let (bar, label) = (find("Bar"), find("Hi"));
+    let doc = &h.ed.doc;
+    assert_eq!(doc.get(bar).unwrap().style.rotation, 90.0);
+    // Layout keeps the upright box; the drawn bounds turn.
+    assert_eq!(doc.get(bar).unwrap().rect.w, 100.0);
+    let info = call(
+        &mut h,
+        "get_node_info",
+        json!({"nodeId": created["created"][0]["id"]}),
+    );
+    let b = &info["drawnBounds"];
+    assert!((b["width"].as_f64().unwrap() - 10.0).abs() < 0.5, "{b}");
+    assert!((b["height"].as_f64().unwrap() - 100.0).abs() < 0.5, "{b}");
+    let styles = call(
+        &mut h,
+        "get_computed_styles",
+        json!({"nodeIds": [created["created"][0]["id"]]}),
+    );
+    assert_eq!(
+        styles[created["created"][0]["id"].as_str().unwrap()]["transform"],
+        "rotate(90deg)"
+    );
+    // The child text inherits the turn, so its glyphs become outline fills.
+    let doc = &h.ed.doc;
+    let xf = sketch_rs::render::draw::world_xf(doc, label).expect("child inherits rotation");
+    let ln = doc.get(label).unwrap();
+    let ops = sketch_rs::render::draw::transform_ops(
+        sketch_rs::render::draw::node_draw(ln, doc.world_rect(label).unwrap(), 1.0).ops,
+        &xf,
+    );
+    assert!(
+        ops.iter()
+            .all(|o| !matches!(o, sketch_rs::render::draw::DrawOp::Glyphs { .. }))
+    );
+
+    if sketch_rs::render::gpu::Headless::new().is_err() {
+        eprintln!("no GPU adapter; skipping pixels");
+        return;
+    }
+    let outs = exec::call(
+        &mut h,
+        "get_screenshot",
+        &json!({"nodeId": ab["id"], "scale": 1}),
+    )
+    .unwrap();
+    let Out::Image { data, .. } = &outs[0] else {
+        panic!()
+    };
+    let img = image::load_from_memory(data).unwrap().to_rgba8();
+    // Upright, the bar would cover (60, 100); turned 90°, it covers (100, 60) instead.
+    let on = img.get_pixel(100, 60).0;
+    let off = img.get_pixel(60, 100).0;
+    assert!(on[0] > 200 && on[1] < 60, "turned bar missing: {on:?}");
+    assert!(off[1] > 200, "upright bar still drawn: {off:?}");
+}
+
+#[test]
+fn layered_shadow_composites_to_its_css_alpha() {
+    let mut h = host();
+    let ab = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "S", "styles": {"width": 200, "height": 200}}),
+    );
+    let created = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": ab["id"], "mode": "insert-children",
+        "html": "<div style='width:60px;height:40px;background:#fff;box-shadow:0 2px 8px rgba(0,0,0,0.5), 0 0 0 1px #000'></div>"}),
+    );
+    let id = num(&created["createdNodeIds"][0]);
+    let n = h.ed.doc.get(id).unwrap();
+    assert_eq!(n.style.shadows.len(), 2);
+    let ops = sketch_rs::render::draw::node_draw(n, h.ed.doc.world_rect(id).unwrap(), 1.0).ops;
+    let alphas: Vec<f32> = ops
+        .iter()
+        .take(8) // blur 8px → 8 layers
+        .map(|o| match o {
+            sketch_rs::render::draw::DrawOp::Fill {
+                paint: sketch_rs::render::draw::PaintSpec::Solid(c),
+                ..
+            } => c[3],
+            _ => panic!("{o:?}"),
+        })
+        .collect();
+    let covered = 1.0 - alphas.iter().map(|a| 1.0 - a).product::<f32>();
+    assert!((covered - 0.5).abs() < 0.01, "{covered}");
 }

@@ -555,7 +555,7 @@ fn node_info(ed: &mut Editor, a: &Args) -> ToolResult {
     }
     v["autoLayout"] = json!(n.layout.is_some());
     let wr = doc.world_rect(id).unwrap_or(n.rect);
-    let b = crate::render::draw::draw_bounds(n, wr);
+    let b = crate::render::draw::turned(doc, id, crate::render::draw::draw_bounds(n, wr));
     v["drawnBounds"] = json!({"x": r2(b.x), "y": r2(b.y), "width": r2(b.w), "height": r2(b.h)});
     text(v)
 }

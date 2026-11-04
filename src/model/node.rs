@@ -81,6 +81,16 @@ impl<'de> Deserialize<'de> for Color {
     }
 }
 
+/// A CSS outer box shadow in local document pixels.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoxShadow {
+    pub x: f64,
+    pub y: f64,
+    pub blur: f64,
+    pub spread: f64,
+    pub color: Color,
+}
+
 /// An inside box border on one edge (top, right, bottom or left).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SideBorder {
@@ -100,6 +110,12 @@ pub struct Style {
     /// Inherited CSS custom properties, retained for later MCP style updates.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub variables: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub shadows: Vec<BoxShadow>,
+    /// CSS `rotate`, in degrees clockwise about the box center. Turns the layer and its
+    /// children when drawn; layout and hit testing keep the unrotated box, like CSS.
+    #[serde(skip_serializing_if = "is_default")]
+    pub rotation: f64,
     /// Fill layers, bottom to top.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub fills: Vec<Paint>,
@@ -138,6 +154,8 @@ impl Default for Style {
     fn default() -> Self {
         Style {
             variables: BTreeMap::new(),
+            shadows: Vec::new(),
+            rotation: 0.0,
             fills: Vec::new(),
             stroke: None,
             stroke_width: 1.0,

@@ -226,8 +226,11 @@ fn sorted(stops: &[Stop]) -> Vec<Stop> {
 /// Draw ops for one node (not its children), in world space.
 pub fn node_draw(n: &Node, wr: Rect, opacity: f64) -> NodeDraw {
     let mut ops = Vec::new();
+    if matches!(n.kind, NodeKind::Frame { .. } | NodeKind::Rect) {
+        box_shadows(n, wr, opacity, &mut ops);
+    }
     if let Some(r) = n.style.rough {
-        ops = super::rough::node_ops(n, wr, opacity, &r);
+        ops.extend(super::rough::node_ops(n, wr, opacity, &r));
         return NodeDraw {
             ops,
             blend: n.style.blend,
@@ -344,6 +347,47 @@ pub fn node_draw(n: &Node, wr: Rect, opacity: f64) -> NodeDraw {
     NodeDraw {
         ops,
         blend: n.style.blend,
+    }
+}
+
+/// Layered outer shadows: several translucent, expanding rounded silhouettes keep
+/// a soft edge in GPU, SVG and PDF without depending on raster-only filters.
+/// ponytail: no true Gaussian blur and the shadow also shows under a translucent fill;
+/// a blur pass in the GPU backend would fix both.
+fn box_shadows(n: &Node, wr: Rect, opacity: f64, ops: &mut Vec<DrawOp>) {
+    for s in &n.style.shadows {
+        let base = wr.translate(v2(s.x, s.y));
+        // About one layer per px of blur keeps bands invisible.
+        let steps = if s.blur > 0.0 {
+            (s.blur.ceil() as usize).clamp(2, 16)
+        } else {
+            1
+        };
+        // Where all layers overlap, the stack composites back to the shadow's own alpha.
+        let alpha = s.color.a as f64 / 255.0 * opacity;
+        let layer = 1.0 - (1.0 - alpha).powf(1.0 / steps as f64);
+        let color = Color::rgba(s.color.r, s.color.g, s.color.b, 255);
+        for i in (0..steps).rev() {
+            // Layers ramp from blur/2 inside to blur/2 outside the spread edge, so the
+            // half-opacity point sits on that edge like a CSS blur.
+            let radius = if steps == 1 {
+                s.spread
+            } else {
+                s.spread - s.blur * 0.5 + s.blur * (i as f64 + 0.5) / steps as f64
+            };
+            let r = base.inflate(radius);
+            if r.w <= 0.0 || r.h <= 0.0 {
+                continue;
+            }
+            ops.push(DrawOp::Fill {
+                path: vector::rounded_rect(
+                    r,
+                    n.style.corner_radii().map(|x| (x + radius).max(0.0)),
+                ),
+                paint: PaintSpec::Solid(rgba(color, layer)),
+                even_odd: false,
+            });
+        }
     }
 }
 
@@ -515,5 +559,200 @@ pub fn draw_bounds(n: &Node, wr: Rect) -> Rect {
     if matches!(n.kind, NodeKind::Sticky { .. }) {
         pad = pad.max(4.0);
     }
-    wr.inflate(pad)
+    let mut bounds = wr.inflate(pad);
+    if matches!(n.kind, NodeKind::Frame { .. } | NodeKind::Rect) {
+        for s in &n.style.shadows {
+            let outer = wr.translate(v2(s.x, s.y)).inflate(s.spread + s.blur);
+            if outer.w > 0.0 && outer.h > 0.0 {
+                bounds = bounds.union(&outer);
+            }
+        }
+    }
+    bounds
+}
+
+/// A 2D affine transform: `x' = a·x + c·y + e`, `y' = b·x + d·y + f`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Xf {
+    pub a: f64,
+    pub b: f64,
+    pub c: f64,
+    pub d: f64,
+    pub e: f64,
+    pub f: f64,
+}
+
+impl Xf {
+    /// Clockwise rotation by `deg` (y points down, like CSS) about `center`.
+    pub fn rotate(center: V2, deg: f64) -> Xf {
+        let (s, c) = deg.to_radians().sin_cos();
+        Xf {
+            a: c,
+            b: s,
+            c: -s,
+            d: c,
+            e: center.x - c * center.x + s * center.y,
+            f: center.y - s * center.x - c * center.y,
+        }
+    }
+    pub fn apply(&self, p: V2) -> V2 {
+        v2(
+            self.a * p.x + self.c * p.y + self.e,
+            self.b * p.x + self.d * p.y + self.f,
+        )
+    }
+    fn vector(&self, p: V2) -> V2 {
+        v2(self.a * p.x + self.c * p.y, self.b * p.x + self.d * p.y)
+    }
+    /// `self` first, then `outer`.
+    pub fn then(&self, outer: &Xf) -> Xf {
+        let p = outer;
+        Xf {
+            a: p.a * self.a + p.c * self.b,
+            b: p.b * self.a + p.d * self.b,
+            c: p.a * self.c + p.c * self.d,
+            d: p.b * self.c + p.d * self.d,
+            e: p.a * self.e + p.c * self.f + p.e,
+            f: p.b * self.e + p.d * self.f + p.f,
+        }
+    }
+    /// Axis-aligned bounds of a transformed rect.
+    pub fn bounds(&self, r: Rect) -> Rect {
+        let pts = [
+            v2(r.x, r.y),
+            v2(r.right(), r.y),
+            v2(r.x, r.bottom()),
+            v2(r.right(), r.bottom()),
+        ]
+        .map(|p| self.apply(p));
+        let (x0, x1) = (
+            pts.iter().map(|p| p.x).fold(f64::INFINITY, f64::min),
+            pts.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max),
+        );
+        let (y0, y1) = (
+            pts.iter().map(|p| p.y).fold(f64::INFINITY, f64::min),
+            pts.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max),
+        );
+        Rect::new(x0, y0, x1 - x0, y1 - y0)
+    }
+}
+
+/// The transform for a node drawn at `wr` inside a parent transformed by `parent`.
+pub fn node_xf(n: &Node, wr: Rect, parent: Option<Xf>) -> Option<Xf> {
+    if n.style.rotation == 0.0 {
+        return parent;
+    }
+    let own = Xf::rotate(wr.center(), n.style.rotation);
+    Some(parent.map_or(own, |p| own.then(&p)))
+}
+
+/// The transform a node is drawn with: its own rotation and every ancestor's.
+pub fn world_xf(doc: &Document, id: NodeId) -> Option<Xf> {
+    let mut chain = doc.ancestors(id);
+    chain.reverse(); // root first
+    chain.push(id);
+    let mut xf = None;
+    for i in chain {
+        if let (Some(n), Some(wr)) = (doc.get(i), doc.world_rect(i)) {
+            xf = node_xf(n, wr, xf);
+        }
+    }
+    xf
+}
+
+/// A world rect as drawn for `id`, after its own and its ancestors' rotations.
+pub fn turned(doc: &Document, id: NodeId, r: Rect) -> Rect {
+    world_xf(doc, id).map_or(r, |x| x.bounds(r))
+}
+
+/// Draw ops moved by a transform. Glyph runs become outline fills so they turn too;
+/// image fills keep an upright placement inside the turned outline.
+pub fn transform_ops(ops: Vec<DrawOp>, xf: &Xf) -> Vec<DrawOp> {
+    let map = |p: &VPath| p.map(|q| xf.apply(q));
+    ops.into_iter()
+        .map(|op| match op {
+            DrawOp::Fill {
+                path,
+                paint,
+                even_odd,
+            } => DrawOp::Fill {
+                path: map(&path),
+                paint: match paint {
+                    PaintSpec::Linear {
+                        p0,
+                        p1,
+                        stops,
+                        opacity,
+                    } => PaintSpec::Linear {
+                        p0: xf.apply(p0),
+                        p1: xf.apply(p1),
+                        stops,
+                        opacity,
+                    },
+                    PaintSpec::Radial {
+                        center,
+                        rx,
+                        ry,
+                        stops,
+                        opacity,
+                    } => PaintSpec::Radial {
+                        center: xf.apply(center),
+                        rx: xf.vector(rx),
+                        ry: xf.vector(ry),
+                        stops,
+                        opacity,
+                    },
+                    PaintSpec::Image {
+                        asset,
+                        place,
+                        tile,
+                        opacity,
+                    } => {
+                        let c = xf.apply(place.center());
+                        let place =
+                            Rect::new(c.x - place.w * 0.5, c.y - place.h * 0.5, place.w, place.h);
+                        PaintSpec::Image {
+                            asset,
+                            place,
+                            tile,
+                            opacity,
+                        }
+                    }
+                    p => p,
+                },
+                even_odd,
+            },
+            DrawOp::Stroke {
+                path,
+                color,
+                width,
+                cap,
+                join,
+                dash,
+            } => DrawOp::Stroke {
+                path: map(&path),
+                color,
+                width,
+                cap,
+                join,
+                dash,
+            },
+            DrawOp::Glyphs {
+                face,
+                size,
+                color,
+                glyphs,
+            } => {
+                let mut path = VPath::new();
+                for (gid, o) in glyphs {
+                    path.append(&text::glyph_path(face, gid, o, size));
+                }
+                DrawOp::Fill {
+                    path: map(&path),
+                    paint: PaintSpec::Solid(color),
+                    even_odd: false,
+                }
+            }
+        })
+        .collect()
 }

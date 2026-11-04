@@ -40,6 +40,12 @@ fn copy_props(main: &Node, inst: &mut Node, overrides: &[String], is_root: bool)
     if !ov("variables") {
         inst.style.variables = s.variables.clone();
     }
+    if !ov("shadows") {
+        inst.style.shadows = s.shadows.clone();
+    }
+    if !ov("rotation") {
+        inst.style.rotation = s.rotation;
+    }
     if !ov("fills") {
         inst.style.fills = s.fills.clone();
     }
