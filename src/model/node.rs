@@ -281,6 +281,9 @@ pub enum NodeKind {
 fn yes() -> bool {
     true
 }
+fn zero_offset(v: &V2) -> bool {
+    *v == V2::ZERO
+}
 fn arrow_head() -> Head {
     Head::Arrow
 }
@@ -392,6 +395,9 @@ pub struct Node {
     pub kind: NodeKind,
     /// Bounds relative to the parent frame's origin (or the world for root nodes).
     pub rect: Rect,
+    /// Offset of a clipping frame's scroll viewport, in its own local coordinates.
+    #[serde(default, skip_serializing_if = "zero_offset")]
+    pub scroll_offset: V2,
     #[serde(default)]
     pub style: Style,
     #[serde(default = "yes")]
@@ -484,6 +490,7 @@ impl Node {
             name: kind.type_name().to_string(),
             kind,
             rect,
+            scroll_offset: V2::ZERO,
             style,
             visible: true,
             locked: false,

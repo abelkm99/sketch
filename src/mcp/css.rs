@@ -959,6 +959,20 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
                 n.text_style.no_wrap = lower == "nowrap";
                 true
             }
+            "scrollTop" | "scrollLeft" if n.is_frame() => match length(v, fs) {
+                Some(px) if px.is_finite() && px >= 0.0 => {
+                    if k == "scrollTop" {
+                        n.scroll_offset.y = px;
+                    } else {
+                        n.scroll_offset.x = px;
+                    }
+                    if let NodeKind::Frame { clip } = &mut n.kind {
+                        *clip = true;
+                    }
+                    true
+                }
+                _ => false,
+            },
             "overflow" if n.is_frame() => {
                 if let NodeKind::Frame { clip } = &mut n.kind {
                     *clip = matches!(lower.as_str(), "hidden" | "clip" | "scroll" | "auto");
@@ -1465,6 +1479,12 @@ pub fn computed(n: &Node, parent_layout: Option<&AutoLayout>, is_root: bool) -> 
     }
     if let NodeKind::Frame { clip: true } = n.kind {
         put("overflow", "hidden".into());
+    }
+    if n.scroll_offset.x != 0.0 {
+        put("scrollLeft", px(n.scroll_offset.x));
+    }
+    if n.scroll_offset.y != 0.0 {
+        put("scrollTop", px(n.scroll_offset.y));
     }
     if !n.visible {
         put("display", "none".into());

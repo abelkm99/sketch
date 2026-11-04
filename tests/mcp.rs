@@ -349,6 +349,46 @@ fn editing_tools_update_move_duplicate_and_delete() {
 }
 
 #[test]
+fn clipping_frame_scroll_top_offsets_children_without_moving_viewport() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Scroll", "styles": {"width": 200, "height": 150}}),
+    );
+    let created = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+        "html": "<div style='width:80px;height:20px;overflow:hidden;scroll-top:20px'><div style='height:20px;background:#ff0000'></div><div style='height:20px;background:#0000ff'></div></div>"}),
+    );
+    assert!(created.get("ignoredStyles").is_none(), "{created}");
+    let id = &created["createdNodeIds"][0];
+    let frame = h.ed.doc.get(num(id)).unwrap();
+    assert_eq!(frame.scroll_offset.y, 20.0);
+    let wr = h.ed.doc.world_rect(num(id)).unwrap();
+    assert_eq!(
+        h.ed.doc.world_rect(frame.children[0]).unwrap().y,
+        wr.y - 20.0
+    );
+    assert_eq!(h.ed.doc.world_rect(frame.children[1]).unwrap().y, wr.y);
+    let styles = call(&mut h, "get_computed_styles", json!({"nodeIds": [id]}));
+    assert_eq!(styles[id.as_str().unwrap()]["scrollTop"], "20px");
+    if sketch_rs::render::gpu::Headless::new().is_ok() {
+        let out = exec::call(&mut h, "get_screenshot", &json!({"nodeId": id})).unwrap();
+        let Out::Image { data, .. } = &out[0] else {
+            panic!("expected image")
+        };
+        let img = image::load_from_memory(data).unwrap().to_rgba8();
+        let p = img.get_pixel(40, 10).0;
+        assert!(
+            p[2] > 200 && p[0] < 50,
+            "scrolled viewport should show blue child: {p:?}"
+        );
+    }
+}
+
+#[test]
 fn mcp_component_instances_and_text_overrides_follow_the_main() {
     let mut h = host();
     let artboard = call(

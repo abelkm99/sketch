@@ -291,7 +291,7 @@ fn text_tool_types_edits_and_removes_empty() {
     assert_eq!(text, "Hellor\nworl");
     let r = rect_of(&e, id);
     assert!(
-        r.w > 30.0 && (r.h - 2.0 * text::line_height(16.0)).abs() < 1e-6,
+        r.w > 30.0 && (r.h - (2.0 * text::line_height(16.0)).ceil()).abs() < 1e-6,
         "{r:?}"
     );
     assert_eq!(

@@ -100,6 +100,7 @@ fn copy_props(main: &Node, inst: &mut Node, overrides: &[String], is_root: bool)
     if !ov("layout") {
         inst.layout = main.layout;
         inst.layout_child = main.layout_child;
+        inst.scroll_offset = main.scroll_offset;
     }
     if !is_root && !ov("position") {
         inst.rect.x = main.rect.x;

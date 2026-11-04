@@ -220,7 +220,7 @@ impl SceneCache {
         {
             return;
         }
-        let o = wr.min();
+        let o = wr.min() - n.scroll_offset;
         for c in &n.children {
             self.walk(doc, *c, o, child_clip, opacity, bucket, tess, cull, out);
         }

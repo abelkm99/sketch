@@ -60,7 +60,7 @@ impl Document {
         let mut cur = parent;
         while let Some(id) = cur {
             let Some(n) = self.nodes.get(&id) else { break };
-            o = o + n.rect.min();
+            o = o + n.rect.min() - n.scroll_offset;
             cur = n.parent;
         }
         o
