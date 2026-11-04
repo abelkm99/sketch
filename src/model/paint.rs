@@ -577,6 +577,8 @@ pub struct LayoutChild {
     /// CSS min/max constraints (width, height), in document pixels.
     pub min_size: [Option<f64>; 2],
     pub max_size: [Option<f64>; 2],
+    /// CSS margins (top, right, bottom, left) outside the layout box.
+    pub margin: [f64; 4],
     /// Ignore auto layout (positioned by constraints instead).
     pub absolute: bool,
     pub constraints: Constraints,

@@ -818,6 +818,24 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
                 }
                 None => false,
             },
+            "margin" => match four(v, fs) {
+                Some(m) => {
+                    n.layout_child.margin = m;
+                    true
+                }
+                None => false,
+            },
+            "marginTop" | "marginRight" | "marginBottom" | "marginLeft" => match length(v, fs) {
+                Some(m) => {
+                    let i = ["marginTop", "marginRight", "marginBottom", "marginLeft"]
+                        .iter()
+                        .position(|x| *x == k)
+                        .unwrap();
+                    n.layout_child.margin[i] = m;
+                    true
+                }
+                None => false,
+            },
             "padding" if n.is_frame() => match four(v, fs) {
                 Some(p) => {
                     layout_mut(n).padding = p;
@@ -1379,6 +1397,14 @@ pub fn computed(n: &Node, parent_layout: Option<&AutoLayout>, is_root: bool) -> 
     } else {
         put("width", size_css(0, n.rect.w));
         put("height", size_css(1, n.rect.h));
+    }
+    for (i, m) in n.layout_child.margin.iter().enumerate() {
+        if *m != 0.0 {
+            put(
+                ["marginTop", "marginRight", "marginBottom", "marginLeft"][i],
+                px(*m),
+            );
+        }
     }
     for axis in [0, 1] {
         if let Some(min) = n.layout_child.min_size[axis] {

@@ -551,6 +551,9 @@ fn node_info(ed: &mut Editor, a: &Args) -> ToolResult {
         v["instance"] = json!(true);
     }
     v["autoLayout"] = json!(n.layout.is_some());
+    let wr = doc.world_rect(id).unwrap_or(n.rect);
+    let b = crate::render::draw::draw_bounds(n, wr);
+    v["drawnBounds"] = json!({"x": r2(b.x), "y": r2(b.y), "width": r2(b.w), "height": r2(b.h)});
     text(v)
 }
 
@@ -1708,11 +1711,18 @@ impl Builder<'_, '_> {
     }
 
     fn layer_name(el: &Element) -> Option<String> {
-        el.attr("layer-name")
+        if let Some(name) = el
+            .attr("layer-name")
             .or_else(|| el.attr("data-name"))
             .or_else(|| el.attr("aria-label"))
             .or_else(|| el.attr("id"))
-            .map(|s| s.chars().take(50).collect())
+        {
+            return Some(name.chars().take(50).collect());
+        }
+        el.attr("class")
+            .and_then(|c| c.split_whitespace().next())
+            .or_else(|| el.attr("role"))
+            .map(|label| format!("{}.{}", el.tag, label).chars().take(50).collect())
     }
 
     /// A text layer for an element whose content is inline only.
@@ -1789,14 +1799,7 @@ impl Builder<'_, '_> {
         n.id = self.tx.alloc_id();
         n.style.fills.clear();
         n.style.variables = parent.variables.clone();
-        n.name = Self::layer_name(el).unwrap_or_else(|| match el.tag.as_str() {
-            "div" | "span" => "Frame".into(),
-            t => {
-                let mut c = t.chars();
-                c.next()
-                    .map_or("Frame".into(), |f| f.to_uppercase().chain(c).collect())
-            }
-        });
+        n.name = Self::layer_name(el).unwrap_or_else(|| el.tag.clone());
         let flex = get(own, "display").is_some_and(|d| d.contains("flex"));
         n.layout = Some(AutoLayout {
             direction: if flex {

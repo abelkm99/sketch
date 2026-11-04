@@ -19,6 +19,14 @@ fn get(r: &Rect, axis: usize) -> (f64, f64) {
     if axis == 0 { (r.x, r.w) } else { (r.y, r.h) }
 }
 
+fn margins(m: &[f64; 4], axis: usize) -> (f64, f64) {
+    if axis == 0 {
+        (m[3], m[1])
+    } else {
+        (m[0], m[2])
+    }
+}
+
 fn set(r: &mut Rect, axis: usize, pos: f64, size: f64) {
     if axis == 0 {
         r.x = pos;
@@ -56,14 +64,16 @@ fn hug_size(doc: &Document, id: NodeId, axis: usize) -> f64 {
         .iter()
         .map(|k| {
             let kn = doc.get(*k).unwrap();
-            match kn.layout_child.sizing[axis] {
+            let size = match kn.layout_child.sizing[axis] {
                 Sizing::Hug => hug_size(doc, *k, axis),
                 // A hug-sized cross axis needs its children's intrinsic sizes
                 // before stretch can distribute the measured line width.
                 Sizing::Fill if axis != main_axis(&l) => hug_size(doc, *k, axis),
                 Sizing::Fill => 0.0,
                 Sizing::Fixed => get(&kn.rect, axis).1,
-            }
+            };
+            let (before, after) = margins(&kn.layout_child.margin, axis);
+            size + before + after
         })
         .collect();
     if axis == main_axis(&l) && !l.wrap {
@@ -80,7 +90,11 @@ fn hug_size(doc: &Document, id: NodeId, axis: usize) -> f64 {
             .iter()
             .map(|line| {
                 line.iter()
-                    .map(|k| get(&doc.get(*k).unwrap().rect, axis).1)
+                    .map(|k| {
+                        let kn = doc.get(*k).unwrap();
+                        let m = margins(&kn.layout_child.margin, axis);
+                        get(&kn.rect, axis).1 + m.0 + m.1
+                    })
                     .fold(0.0, f64::max)
             })
             .collect();
@@ -107,7 +121,9 @@ fn wrap_lines(
     let mut lines: Vec<Vec<NodeId>> = vec![Vec::new()];
     let mut x = 0.0;
     for k in kids {
-        let s = get(&doc.get(*k).unwrap().rect, ma).1;
+        let n = doc.get(*k).unwrap();
+        let (before, after) = margins(&n.layout_child.margin, ma);
+        let s = get(&n.rect, ma).1 + before + after;
         let line = lines.last_mut().unwrap();
         if !line.is_empty() && x + l.gap + s > inner + 1e-9 {
             lines.push(vec![*k]);
@@ -209,7 +225,15 @@ fn arrange(tx: &mut Tx, id: NodeId, l: &AutoLayout, rect: Rect, ma: usize, ca: u
             })
             .collect();
         let gap = if l.gap_auto { 0.0 } else { l.gap };
-        let fixed: f64 = sizes.iter().sum::<f64>() + gap * line.len().saturating_sub(1) as f64;
+        let margin_total: f64 = line
+            .iter()
+            .map(|k| {
+                let m = margins(&tx.doc().get(*k).unwrap().layout_child.margin, ma);
+                m.0 + m.1
+            })
+            .sum();
+        let fixed: f64 =
+            sizes.iter().sum::<f64>() + margin_total + gap * line.len().saturating_sub(1) as f64;
         let fills: Vec<usize> = (0..line.len())
             .filter(|i| tx.doc().get(line[*i]).unwrap().layout_child.sizing[ma] == Sizing::Fill)
             .collect();
@@ -227,12 +251,14 @@ fn arrange(tx: &mut Tx, id: NodeId, l: &AutoLayout, rect: Rect, ma: usize, ca: u
                 .layout_child
                 .constrain(ma, sizes[i]);
         }
-        let used: f64 = sizes.iter().sum::<f64>() + gap * line.len().saturating_sub(1) as f64;
+        let used: f64 =
+            sizes.iter().sum::<f64>() + margin_total + gap * line.len().saturating_sub(1) as f64;
         let free = inner_m - used;
         let (mut cursor, gap) = if l.gap_auto && line.len() > 1 {
             (
                 p0m,
-                ((inner_m - sizes.iter().sum::<f64>()) / (line.len() - 1) as f64).max(0.0),
+                ((inner_m - sizes.iter().sum::<f64>() - margin_total) / (line.len() - 1) as f64)
+                    .max(0.0),
             )
         } else {
             let start = match l.align_main {
@@ -244,7 +270,11 @@ fn arrange(tx: &mut Tx, id: NodeId, l: &AutoLayout, rect: Rect, ma: usize, ca: u
         };
         let line_cross = if l.wrap {
             line.iter()
-                .map(|k| get(&tx.doc().get(*k).unwrap().rect, ca).1)
+                .map(|k| {
+                    let n = tx.doc().get(*k).unwrap();
+                    let m = margins(&n.layout_child.margin, ca);
+                    get(&n.rect, ca).1 + m.0 + m.1
+                })
                 .fold(0.0, f64::max)
         } else {
             inner_c
@@ -252,21 +282,24 @@ fn arrange(tx: &mut Tx, id: NodeId, l: &AutoLayout, rect: Rect, ma: usize, ca: u
         for (i, k) in line.iter().enumerate() {
             let kn = tx.doc().get(*k).unwrap();
             let mut r = kn.rect;
+            let (mb, me) = margins(&kn.layout_child.margin, ma);
+            let (cb, ce) = margins(&kn.layout_child.margin, ca);
             let cs = kn.layout_child.constrain(
                 ca,
                 match kn.layout_child.sizing[ca] {
-                    Sizing::Fill => line_cross.max(0.0),
+                    Sizing::Fill => (line_cross - cb - ce).max(0.0),
                     _ => get(&r, ca).1,
                 },
             );
             let cpos = match l.align_cross {
-                Align::Start => cross_cursor,
-                Align::Center => cross_cursor + (line_cross - cs) * 0.5,
-                Align::End => cross_cursor + line_cross - cs,
+                Align::Start => cross_cursor + cb,
+                Align::Center => cross_cursor + cb + (line_cross - cb - ce - cs) * 0.5,
+                Align::End => cross_cursor + line_cross - ce - cs,
             };
+            cursor += mb;
             set(&mut r, ma, cursor, sizes[i]);
             set(&mut r, ca, cpos, cs);
-            cursor += sizes[i] + gap;
+            cursor += sizes[i] + me + gap;
             if r != kn.rect {
                 let resized = (r.w - kn.rect.w).abs() > 1e-9 || (r.h - kn.rect.h).abs() > 1e-9;
                 let old = kn.rect;

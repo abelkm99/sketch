@@ -17,7 +17,7 @@ looking at). Use list_resources / open_file / create_file to pick a project.
 switching the user's view. Node ids are opaque strings; never show them to the user.
 - Build UI with create_artboard, then write_html into it, one visual group per call (a header, \
 a row, a card) so the user sees progress. Inline styles only; flexbox (display:flex, gap, \
-padding, align-items, justify-content) is the layout model; no margin, grid or tables.
+padding, margin, align-items, justify-content) is the layout model; no grid or tables.
 - Text uses Inter (regular, bold, italic). Use px for font sizes.
 - Edit with update_styles, set_text_content, rename_nodes, duplicate_nodes, move_nodes, \
 delete_nodes. Whiteboard shapes, sticky notes and arrows: create_shape. Hand-drawn style: \
@@ -307,8 +307,8 @@ pub fn definitions() -> Vec<Value> {
              \"replace\" replaces targetNodeId with it.\n\
              - Inline styles only. Flexbox (display:flex, flex-direction, gap, padding, \
              align-items, justify-content, flex-grow, flex-wrap) is the layout model; block \
-             elements stack vertically. position:absolute with left/top is supported. No margin, \
-             grid or tables.\n\
+             elements stack vertically. position:absolute with left/top and flex-child margins \
+             are supported. No grid or tables.\n\
              - Text: font-size, font-weight (bundled Inter 400/500/600/700), font-style, color, \
              line-height, letter-spacing, text-align, text-decoration; <b>/<i>/<u>/<s>/<span style> \
              make rich text. Inter and Noto Sans Mono (font-family:monospace) are bundled.\n\
@@ -510,7 +510,7 @@ justify-content, align-items, align-self, flex-grow, overflow, background, backg
 background-image (url(), linear-gradient(), radial-gradient()), background-size/object-fit,
 border, border-color/width/style, border-radius (1–4 values), opacity, mix-blend-mode, color,
 font-size, font-weight, font-style, line-height, letter-spacing, text-align, text-decoration.
-Ignored (reported back): margin, grid, box-shadow, transform, filters, transitions.";
+Ignored (reported back): grid, box-shadow, transform, filters, transitions.";
 
 pub const GUIDE_WHITEBOARD: &str = "\
 # Whiteboard elements

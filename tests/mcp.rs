@@ -349,6 +349,61 @@ fn editing_tools_update_move_duplicate_and_delete() {
 }
 
 #[test]
+fn css_margin_top_offsets_flex_items_and_expands_hug_size() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Margins", "styles": {"width": 200, "height": 130}}),
+    );
+    let created = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+        "html": "<div style='display:flex;flex-direction:column;width:100px;height:fit-content'><span>Label</span><div style='height:2px;margin-top:8px;background:#111'></div></div>"}),
+    );
+    assert!(created.get("ignoredStyles").is_none(), "{created}");
+    let root = h.ed.doc.get(num(&created["createdNodeIds"][0])).unwrap();
+    let (text, rule) = (
+        h.ed.doc.get(root.children[0]).unwrap(),
+        h.ed.doc.get(root.children[1]).unwrap(),
+    );
+    assert_eq!(rule.rect.y, text.rect.h + 8.0);
+    assert_eq!(root.rect.h, text.rect.h + 10.0);
+    let id = exec::node_key(&h.ed, 0, rule.id);
+    let styles = call(&mut h, "get_computed_styles", json!({"nodeIds": [id]}));
+    assert_eq!(styles[id.as_str()]["marginTop"], "8px");
+}
+
+#[test]
+fn mcp_names_elements_and_reports_visual_bounds() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Notes", "styles": {"width": 200, "height": 130}}),
+    );
+    let created = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+        "html": "<section class='card panel' style='width:80px;height:40px;border:4px solid #000'><span>Hello</span></section>"}),
+    );
+    let id = &created["createdNodeIds"][0];
+    let n = h.ed.doc.get(num(id)).unwrap();
+    assert_eq!(n.name, "section.card");
+    let info = call(&mut h, "get_node_info", json!({"nodeId": id}));
+    let wr = h.ed.doc.world_rect(num(id)).unwrap();
+    let bounds = info["drawnBounds"]
+        .as_object()
+        .expect("reported visual bounds");
+    assert_eq!(bounds["x"], wr.x);
+    assert_eq!(bounds["y"], wr.y);
+    assert_eq!(bounds["width"], wr.w);
+    assert_eq!(bounds["height"], wr.h);
+}
+
+#[test]
 fn text_height_snaps_following_dividers_to_pixel_grid() {
     let mut h = host();
     let artboard = call(
