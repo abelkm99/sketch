@@ -336,11 +336,45 @@ pub fn node_draw(n: &Node, wr: Rect, opacity: f64) -> NodeDraw {
                     dash: n.style.dash.clone(),
                 });
             }
+            if matches!(n.kind, NodeKind::Frame { .. } | NodeKind::Rect) {
+                box_border_sides(n, wr, opacity, &mut ops);
+            }
         }
     }
     NodeDraw {
         ops,
         blend: n.style.blend,
+    }
+}
+
+/// Inside strokes along selected box edges, shared by GPU, SVG and PDF backends.
+fn box_border_sides(n: &Node, wr: Rect, opacity: f64, ops: &mut Vec<DrawOp>) {
+    for (side, border) in n.style.border_sides.iter().enumerate() {
+        let Some(border) = border else { continue };
+        if border.width <= 0.0 || wr.w <= 0.0 || wr.h <= 0.0 {
+            continue;
+        }
+        let half = border.width * 0.5;
+        let (a, b) = match side {
+            0 => (v2(wr.x, wr.y + half), v2(wr.x + wr.w, wr.y + half)),
+            1 => (
+                v2(wr.x + wr.w - half, wr.y),
+                v2(wr.x + wr.w - half, wr.y + wr.h),
+            ),
+            2 => (
+                v2(wr.x, wr.y + wr.h - half),
+                v2(wr.x + wr.w, wr.y + wr.h - half),
+            ),
+            _ => (v2(wr.x + half, wr.y), v2(wr.x + half, wr.y + wr.h)),
+        };
+        ops.push(DrawOp::Stroke {
+            path: VPath::polyline(&[a, b], false),
+            color: rgba(border.color, opacity),
+            width: border.width,
+            cap: Cap::Butt,
+            join: Join::Miter,
+            dash: border.dash.clone(),
+        });
     }
 }
 

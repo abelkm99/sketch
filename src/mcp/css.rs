@@ -949,8 +949,18 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
             }
             "fontWeight" | "fontStyle" | "lineHeight" | "letterSpacing" | "textAlign"
             | "textDecoration" => true, // inherited by text children
-            "border" | "outline" | "borderTop" | "borderRight" | "borderBottom" | "borderLeft" => {
+            "border" | "outline" => {
+                if k == "border" {
+                    n.style.border_sides = [None, None, None, None];
+                }
                 apply_border(n, v, fs)
+            }
+            "borderTop" | "borderRight" | "borderBottom" | "borderLeft" => {
+                let side = ["borderTop", "borderRight", "borderBottom", "borderLeft"]
+                    .iter()
+                    .position(|s| *s == k)
+                    .unwrap();
+                apply_border_side(n, side, v, fs)
             }
             "borderColor" | "stroke" => match color(v) {
                 Some(c) => {
@@ -1110,6 +1120,26 @@ fn set_dash(n: &mut Node, style: &str) {
         "dotted" => vec![w, w * 2.0],
         _ => Vec::new(),
     };
+}
+
+fn apply_border_side(n: &mut Node, side: usize, v: &str, fs: f64) -> bool {
+    // Parse with the same shorthand rules as a full border, without changing its outline.
+    let mut probe = n.clone();
+    probe.style.stroke = None;
+    probe.style.stroke_width = 1.0;
+    probe.style.dash.clear();
+    if !apply_border(&mut probe, v, fs) {
+        return false;
+    }
+    n.style.border_sides[side] = probe
+        .style
+        .stroke
+        .map(|color| crate::model::node::SideBorder {
+            color,
+            width: probe.style.stroke_width,
+            dash: probe.style.dash,
+        });
+    true
 }
 
 fn apply_border(n: &mut Node, v: &str, fs: f64) -> bool {
@@ -1353,6 +1383,23 @@ pub fn computed(n: &Node, parent_layout: Option<&AutoLayout>, is_root: bool) -> 
             "border",
             format!("{} {kind} {}", px(n.style.stroke_width), color_css(s)),
         );
+    }
+    for (i, border) in n.style.border_sides.iter().enumerate() {
+        if let Some(border) = border
+            && border.width > 0.0
+        {
+            let kind = if border.dash.is_empty() {
+                "solid"
+            } else if border.dash[0] <= border.width * 1.5 {
+                "dotted"
+            } else {
+                "dashed"
+            };
+            put(
+                ["borderTop", "borderRight", "borderBottom", "borderLeft"][i],
+                format!("{} {kind} {}", px(border.width), color_css(border.color)),
+            );
+        }
     }
     if let Some(r) = n.style.radii {
         put(

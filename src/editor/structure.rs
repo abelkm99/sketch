@@ -43,6 +43,7 @@ fn copy_props(main: &Node, inst: &mut Node, overrides: &[String], is_root: bool)
     if !ov("stroke") {
         inst.style.stroke = s.stroke;
         inst.style.stroke_width = s.stroke_width;
+        inst.style.border_sides = s.border_sides.clone();
         inst.style.stroke_align = s.stroke_align;
         inst.style.dash = s.dash.clone();
         inst.style.cap = s.cap;

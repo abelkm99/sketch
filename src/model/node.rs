@@ -80,6 +80,19 @@ impl<'de> Deserialize<'de> for Color {
     }
 }
 
+/// An inside box border on one edge (top, right, bottom or left).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SideBorder {
+    pub color: Color,
+    pub width: f64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dash: Vec<f64>,
+}
+
+fn no_border_sides(sides: &[Option<SideBorder>; 4]) -> bool {
+    sides.iter().all(Option::is_none)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Style {
@@ -88,6 +101,9 @@ pub struct Style {
     pub fills: Vec<Paint>,
     pub stroke: Option<Color>,
     pub stroke_width: f64,
+    /// Optional inside borders (top, right, bottom, left), independent of the full outline.
+    #[serde(skip_serializing_if = "no_border_sides")]
+    pub border_sides: [Option<SideBorder>; 4],
     #[serde(skip_serializing_if = "is_default")]
     pub stroke_align: StrokeAlign,
     /// Dash pattern (lengths in px); empty = solid.
@@ -120,6 +136,7 @@ impl Default for Style {
             fills: Vec::new(),
             stroke: None,
             stroke_width: 1.0,
+            border_sides: [None, None, None, None],
             stroke_align: StrokeAlign::Center,
             dash: Vec::new(),
             cap: Cap::Butt,

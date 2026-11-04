@@ -477,6 +477,115 @@ fn screenshot_returns_png() {
 }
 
 #[test]
+fn border_bottom_only_renders_on_bottom_and_can_be_removed() {
+    use sketch_rs::render::draw::{self, DrawOp};
+    use sketch_rs::vector::Seg;
+
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Borders", "styles": {"width": 100, "height": 100}}),
+    );
+    let result = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+               "html": r#"<div layer-name="Bottom" style="width:60px;height:30px;border-bottom:2px solid #ff0000"></div>"#}),
+    );
+    let id = &result["createdNodeIds"][0];
+    let node = num(id);
+    let n = h.ed.doc.get(node).unwrap();
+    let wr = h.ed.doc.world_rect(node).unwrap();
+    let drawn = draw::node_draw(n, wr, 1.0);
+    let strokes: Vec<_> = drawn
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            DrawOp::Stroke { path, width, .. } => Some((path, width)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(strokes.len(), 1, "only the bottom edge should be outlined");
+    assert_eq!(*strokes[0].1, 2.0);
+    assert!(
+        matches!(strokes[0].0.segs.as_slice(), [Seg::M(a), Seg::L(b)] if
+        (a.y - (wr.y + wr.h - 1.0)).abs() < 1e-9 &&
+        (b.y - a.y).abs() < 1e-9 &&
+        (b.x - a.x - wr.w).abs() < 1e-9)
+    );
+    let saved = serde_json::to_value(&n.style).unwrap();
+    assert!(
+        saved.get("border_sides").is_some(),
+        "border sides must persist in documents"
+    );
+    let restored: sketch_rs::model::Style = serde_json::from_value(saved).unwrap();
+    assert_eq!(restored, n.style);
+    let styles = call(&mut h, "get_computed_styles", json!({"nodeIds": [id]}));
+    assert_eq!(
+        styles[id.as_str().unwrap()]["borderBottom"],
+        "2px solid #ff0000"
+    );
+    assert!(styles[id.as_str().unwrap()].get("border").is_none());
+    let jsx = call(&mut h, "get_jsx", json!({"nodeId": id}));
+    assert!(jsx.as_str().unwrap().contains("borderBottom"), "{jsx}");
+
+    if sketch_rs::render::gpu::Headless::new().is_ok() {
+        let outs = exec::call(&mut h, "get_screenshot", &json!({"nodeId": id})).unwrap();
+        let Out::Image { data, .. } = &outs[0] else {
+            panic!("expected PNG")
+        };
+        let img = image::load_from_memory(data).unwrap().to_rgba8();
+        assert_eq!(img.dimensions(), (60, 30));
+        let top = img.get_pixel(30, 2).0;
+        assert!(top[1] > 220 && top[2] > 220, "top must not be red: {top:?}");
+        let bottom = img.get_pixel(30, 29).0;
+        assert!(
+            bottom[0] > 220 && bottom[1] < 40 && bottom[2] < 40,
+            "{bottom:?}"
+        );
+    }
+
+    call(
+        &mut h,
+        "update_styles",
+        json!({"updates": [{"nodeIds": [id], "styles": {"borderBottom": "none"}}]}),
+    );
+    let n = h.ed.doc.get(node).unwrap();
+    let drawn = draw::node_draw(n, h.ed.doc.world_rect(node).unwrap(), 1.0);
+    assert!(
+        !drawn
+            .ops
+            .iter()
+            .any(|op| matches!(op, DrawOp::Stroke { .. }))
+    );
+
+    call(
+        &mut h,
+        "update_styles",
+        json!({"updates": [{"nodeIds": [id], "styles": {"border": "1px solid #0000ff", "borderBottom": "2px solid #ff0000"}}]}),
+    );
+    let n = h.ed.doc.get(node).unwrap();
+    assert!(
+        n.style.stroke.is_some(),
+        "the full border must remain independent"
+    );
+    assert!(n.style.border_sides[2].is_some());
+    call(
+        &mut h,
+        "update_styles",
+        json!({"updates": [{"nodeIds": [id], "styles": {"borderBottom": "none"}}]}),
+    );
+    let n = h.ed.doc.get(node).unwrap();
+    assert!(n.style.border_sides[2].is_none());
+    assert_eq!(n.style.stroke_width, 1.0);
+    assert!(
+        n.style.stroke.is_some(),
+        "removing one side must preserve the outline"
+    );
+}
+
+#[test]
 fn screenshot_of_layer_inside_clipping_artboard() {
     let mut h = host();
     let artboard = call(
