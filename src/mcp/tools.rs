@@ -376,11 +376,11 @@ pub fn definitions() -> Vec<Value> {
         ),
         tool(
             "set_text_content",
-            "Set the text of one or more Text or Sticky nodes (batch).",
+            "Replace the text of Text or Sticky nodes (batch). Pass plain textContent to reset old rich-text runs, or html for inline formatting (b, span styles, etc.). Exactly one is required per update.",
             json!({"updates": {"type": "array", "items": {
                 "type": "object",
-                "properties": {"nodeId": {"type": "string"}, "textContent": {"type": "string"}},
-                "required": ["nodeId", "textContent"],
+                "properties": {"nodeId": {"type": "string"}, "textContent": {"type": "string"}, "html": {"type": "string"}},
+                "required": ["nodeId"],
             }}}),
             &["updates"],
             false,

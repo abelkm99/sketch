@@ -349,6 +349,61 @@ fn editing_tools_update_move_duplicate_and_delete() {
 }
 
 #[test]
+fn replacing_text_clears_old_runs_and_html_rebuilds_them() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Rich", "styles": {"width": 300, "height": 150}}),
+    );
+    let created = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children", "html": "<p>Bill <b>14286147</b></p>"}),
+    );
+    let id = &created["createdNodeIds"][0];
+    let original = h.ed.doc.get(num(id)).unwrap();
+    assert_eq!(original.kind.text().unwrap(), "Bill 14286147");
+    assert!(
+        original
+            .text_style
+            .spans
+            .iter()
+            .any(|s| s.bold == Some(true))
+    );
+    call(
+        &mut h,
+        "set_text_content",
+        json!({"updates": [{"nodeId": id, "textContent": "Bill 14285982 (updated)"}]}),
+    );
+    let plain = h.ed.doc.get(num(id)).unwrap();
+    assert_eq!(plain.kind.text().unwrap(), "Bill 14285982 (updated)");
+    assert!(
+        plain.text_style.spans.is_empty(),
+        "old runs must not style new positions"
+    );
+    call(
+        &mut h,
+        "set_text_content",
+        json!({"updates": [{"nodeId": id, "html": "Bill <b>14285982</b> <span style='color:#ff0000'>paid</span>"}]}),
+    );
+    let rich = h.ed.doc.get(num(id)).unwrap();
+    assert_eq!(rich.kind.text().unwrap(), "Bill 14285982 paid");
+    assert!(
+        rich.text_style
+            .spans
+            .iter()
+            .any(|s| s.start == 5 && s.end == 13 && s.bold == Some(true))
+    );
+    assert!(
+        rich.text_style
+            .spans
+            .iter()
+            .any(|s| s.start == 14 && s.end == 18 && s.color == Some(Color::rgb(255, 0, 0)))
+    );
+}
+
+#[test]
 fn find_nodes_matches_substrings_and_query_in_absolute_children() {
     let mut h = host();
     let artboard = call(

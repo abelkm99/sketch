@@ -1470,6 +1470,29 @@ fn collect_runs(nodes: &[Html], run: Run, base_fs: f64, out: &mut Vec<(char, Run
     }
 }
 
+fn apply_runs(ts: &mut crate::model::TextStyle, chars: &[(char, Run)]) {
+    let mut i = 0;
+    while i < chars.len() {
+        let r = chars[i].1;
+        let mut j = i + 1;
+        while j < chars.len() && chars[j].1 == r {
+            j += 1;
+        }
+        if r != Run::default() {
+            ts.apply_range(i, j, |s| {
+                s.bold = r.bold;
+                s.italic = r.italic;
+                s.underline = r.underline;
+                s.strike = r.strike;
+                s.color = r.color;
+                s.size = r.size;
+            });
+        }
+        i = j;
+    }
+    ts.normalize();
+}
+
 /// Collapse whitespace like CSS `white-space: normal` (hard breaks from `<br>` survive).
 fn collapse(chars: Vec<(char, Run)>, pre: bool) -> Vec<(char, Run)> {
     if pre {
@@ -1714,38 +1737,7 @@ impl Builder<'_, '_> {
         let a = css::apply(&mut n, &styles, &parent.ctx());
         self.note(&a);
         // Rich text runs.
-        let mut i = 0;
-        while i < chars.len() {
-            let r = chars[i].1;
-            let mut j = i + 1;
-            while j < chars.len() && chars[j].1 == r {
-                j += 1;
-            }
-            if r != Run::default() {
-                n.text_style.apply_range(i, j, |s| {
-                    if r.bold.is_some() {
-                        s.bold = r.bold;
-                    }
-                    if r.italic.is_some() {
-                        s.italic = r.italic;
-                    }
-                    if r.underline.is_some() {
-                        s.underline = r.underline;
-                    }
-                    if r.strike.is_some() {
-                        s.strike = r.strike;
-                    }
-                    if r.color.is_some() {
-                        s.color = r.color;
-                    }
-                    if r.size.is_some() {
-                        s.size = r.size;
-                    }
-                });
-            }
-            i = j;
-        }
-        n.text_style.normalize();
+        apply_runs(&mut n.text_style, &chars);
         let keep_h = get(own, "height").is_some_and(|v| css::length(v, fs).is_some());
         let id = self.insert(n, parent, index);
         fit_text(self.tx, id, keep_h);
@@ -2512,16 +2504,20 @@ fn batch<T: Clone>(
 }
 
 fn set_text_content(ed: &mut Editor, a: &Args) -> ToolResult {
+    #[derive(Clone)]
+    enum Change {
+        Plain(String),
+        Html(Vec<Html>),
+    }
     let n = batch(
         ed,
         a,
         "updates",
         "Set text",
-        |u| {
-            Ok(u.get("textContent")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string())
+        |u| match (u.get("textContent"), u.get("html")) {
+            (Some(Value::String(t)), None) => Ok(Change::Plain(t.clone())),
+            (None, Some(Value::String(s))) => Ok(Change::Html(html::parse(s))),
+            _ => Err("pass exactly one of textContent or html (as a string)".into()),
         },
         |node| {
             node.kind.text().map(|_| ()).ok_or_else(|| {
@@ -2532,19 +2528,23 @@ fn set_text_content(ed: &mut Editor, a: &Args) -> ToolResult {
                 )
             })
         },
-        |tx, id, t| {
-            let node = tx.node_mut(id).unwrap();
-            let old_len = node.kind.text().unwrap().chars().count();
-            *node.kind.text_mut().unwrap() = t.clone();
-            let len = t.chars().count();
-            for s in &mut node.text_style.spans {
-                if s.start == 0 && s.end >= old_len {
-                    s.end = len;
+        |tx, id, change| {
+            let (content, runs) = match change {
+                Change::Plain(t) => (t.clone(), None),
+                Change::Html(nodes) => {
+                    let fs = tx.doc().get(id).unwrap().kind.font_size().unwrap_or(16.0);
+                    let mut chars = Vec::new();
+                    collect_runs(nodes, Run::default(), fs, &mut chars);
+                    let chars = collapse(chars, false);
+                    (chars.iter().map(|(c, _)| *c).collect(), Some(chars))
                 }
-                s.start = s.start.min(len);
-                s.end = s.end.min(len);
+            };
+            let node = tx.node_mut(id).unwrap();
+            *node.kind.text_mut().unwrap() = content;
+            node.text_style.spans.clear();
+            if let Some(chars) = runs {
+                apply_runs(&mut node.text_style, &chars);
             }
-            node.text_style.spans.retain(|s| s.end > s.start);
             fit_text(tx, id, false);
             relayout(tx, Some(id));
             Ok(())
