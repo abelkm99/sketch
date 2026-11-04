@@ -20,7 +20,8 @@ a row, a card) so the user sees progress. Inline styles only; flexbox (display:f
 padding, margin, align-items, justify-content) is the layout model; no grid or tables.
 - Text uses Inter (regular, bold, italic). Use px for font sizes.
 - Edit with update_styles, set_text_content, rename_nodes, duplicate_nodes, move_nodes, \
-delete_nodes. Whiteboard shapes, sticky notes and arrows: create_shape. Hand-drawn style: \
+delete_nodes. Reuse designs with create_component, create_instance, set_instance_overrides. \
+Whiteboard shapes, sticky notes and arrows: create_shape. Hand-drawn style: \
 update_styles with {\"sketch\": true, \"roughness\": 1, \"fillStyle\": \"hachure\"}.
 - Check your work with get_screenshot. Artboard height is a starting point: when content \
 clips set height: \"fit-content\" with update_styles.
@@ -415,6 +416,29 @@ pub fn definitions() -> Vec<Value> {
                 "required": ["id"],
             }}}),
             &["nodes"],
+            false,
+        ),
+        tool(
+            "create_component",
+            "Mark an existing frame as a main component without changing the user's selection. Returns componentId.",
+            json!({"nodeId": node_id("Existing frame to make a main component.")}),
+            &["nodeId"],
+            false,
+        ),
+        tool(
+            "create_instance",
+            "Create a linked instance of a main component, optionally under a frame/group. Coordinates x/y are local to parentId (or world coordinates for root). Returns instanceId and all created descendants with their corresponding mainId.",
+            json!({"componentId": node_id("Main component on the same page."),
+                "parentId": node_id("Optional frame/group; omit or use root for page root."),
+                "x": {"type": "number"}, "y": {"type": "number"}}),
+            &["componentId"],
+            false,
+        ),
+        tool(
+            "set_instance_overrides",
+            "Set a text override on a text layer inside an instance; subsequent edits to the main component leave this text alone. Plain text replaces old rich-text runs.",
+            json!({"nodeId": node_id("Text layer inside an instance."), "text": {"type": "string"}}),
+            &["nodeId", "text"],
             false,
         ),
         tool(

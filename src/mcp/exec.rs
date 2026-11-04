@@ -280,6 +280,9 @@ pub fn call(host: &mut dyn Host, name: &str, args: &Value) -> ToolResult {
                 "rename_nodes" => rename_nodes(ed, &a),
                 "delete_nodes" => delete_nodes(ed, &a),
                 "duplicate_nodes" => duplicate_nodes(ed, &a),
+                "create_component" => create_component(ed, &a),
+                "create_instance" => create_instance(ed, &a),
+                "set_instance_overrides" => set_instance_overrides(ed, &a),
                 "move_nodes" => move_nodes(ed, &a),
                 "select_nodes" => select_nodes(ed, &a),
                 "undo" | "redo" => undo_redo(ed, &a, name == "undo"),
@@ -2649,6 +2652,95 @@ fn delete_nodes(ed: &mut Editor, a: &Args) -> ToolResult {
         v["notFound"] = json!(missing);
     }
     text(v)
+}
+
+fn create_component(ed: &mut Editor, a: &Args) -> ToolResult {
+    let (page, id) = resolve(ed, a.req_str("nodeId")?, page_arg(ed, a)?)?;
+    let n = ed.page_doc(page).get(id).unwrap();
+    if !n.is_frame() || n.instance.is_some() {
+        return Err("nodeId must be a frame that is not already an instance".into());
+    }
+    if !n.component {
+        ed.with_page(page, |ed| {
+            ed.edit("Create component", |tx| {
+                tx.node_mut(id).unwrap().component = true;
+            })
+        });
+    }
+    text(json!({"componentId": node_key(ed, page, id)}))
+}
+
+fn create_instance(ed: &mut Editor, a: &Args) -> ToolResult {
+    let (page, main) = resolve(ed, a.req_str("componentId")?, page_arg(ed, a)?)?;
+    if !ed.page_doc(page).get(main).unwrap().component {
+        return Err("componentId must refer to a main component".into());
+    }
+    let parent = match a.str("parentId") {
+        None | Some(ROOT) => None,
+        Some(k) => {
+            let (p, id) = resolve(ed, k, page)?;
+            if p != page {
+                return Err("instances must be on the same page as their component".into());
+            }
+            if !ed.page_doc(page).get(id).unwrap().is_container() {
+                return Err("parentId must be a frame or group".into());
+            }
+            if id == main || ed.page_doc(page).is_ancestor(main, id) {
+                return Err("cannot put an instance inside its own main component".into());
+            }
+            Some(id)
+        }
+    };
+    let at = if parent.is_none() {
+        free_spot(
+            ed.page_doc(page),
+            ed.page_doc(page).get(main).unwrap().rect.w,
+        )
+    } else {
+        V2::ZERO
+    };
+    let at = v2(a.num("x").unwrap_or(at.x), a.num("y").unwrap_or(at.y));
+    let id = ed
+        .with_page(page, |ed| ed.create_instance_under(main, parent, at))
+        .ok_or("cannot create an instance of this component")?;
+    let doc = ed.page_doc(page);
+    let created: Vec<Value> = doc
+        .subtree(id)
+        .iter()
+        .map(|i| {
+            let n = doc.get(*i).unwrap();
+            json!({"id": node_key(ed, page, *i), "name": n.name,
+               "parent": n.parent.map_or(ROOT.into(), |p| node_key(ed, page, p)),
+               "mainId": node_key(ed, page, n.instance.as_ref().unwrap().main)})
+        })
+        .collect();
+    text(json!({"instanceId": node_key(ed, page, id), "created": created}))
+}
+
+fn set_instance_overrides(ed: &mut Editor, a: &Args) -> ToolResult {
+    let (page, id) = resolve(ed, a.req_str("nodeId")?, page_arg(ed, a)?)?;
+    let text_value = a.req_str("text")?.to_string();
+    let n = ed.page_doc(page).get(id).unwrap();
+    if n.instance.is_none() || !matches!(n.kind, NodeKind::Text { .. }) {
+        return Err(format!(
+            "{} must be a text layer inside an instance",
+            node_key(ed, page, id)
+        ));
+    }
+    ed.with_page(page, |ed| {
+        ed.edit("Override instance text", |tx| {
+            let n = tx.node_mut(id).unwrap();
+            *n.kind.text_mut().unwrap() = text_value;
+            n.text_style.spans.clear();
+            let link = n.instance.as_mut().unwrap();
+            if !link.overrides.iter().any(|s| s == "text") {
+                link.overrides.push("text".into());
+            }
+            fit_text(tx, id, false);
+            relayout(tx, Some(id));
+        })
+    });
+    text(json!({"updated": 1, "nodeId": node_key(ed, page, id)}))
 }
 
 fn duplicate_nodes(ed: &mut Editor, a: &Args) -> ToolResult {

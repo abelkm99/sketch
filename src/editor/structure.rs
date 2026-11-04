@@ -444,6 +444,32 @@ impl Editor {
         Some(id)
     }
 
+    /// Instantiate a component under a parent without changing the user's selection.
+    /// `at` is local to that parent (world coordinates when parent is the page root).
+    pub fn create_instance_under(
+        &mut self,
+        component: NodeId,
+        parent: Option<NodeId>,
+        at: V2,
+    ) -> Option<NodeId> {
+        let main = self.doc.get(component)?;
+        if !main.component
+            || parent.is_some_and(|p| !self.doc.get(p).is_some_and(Node::is_container))
+        {
+            return None;
+        }
+        let size = (main.rect.w, main.rect.h);
+        Some(self.edit("Create instance", |tx| {
+            instantiate(
+                tx,
+                component,
+                parent,
+                None,
+                Some(Rect::new(at.x, at.y, size.0, size.1)),
+            )
+        }))
+    }
+
     /// Duplicate the selected component as an instance to its right (Figma: Alt-drag).
     pub fn instance_of_selection(&mut self) {
         let Some(&c) = self.selection.first() else {

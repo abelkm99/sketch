@@ -349,6 +349,71 @@ fn editing_tools_update_move_duplicate_and_delete() {
 }
 
 #[test]
+fn mcp_component_instances_and_text_overrides_follow_the_main() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Components", "styles": {"width": 330, "height": 240}}),
+    );
+    let created = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+        "html": "<div layer-name='Row' style='display:flex;gap:4px'><span>Old</span></div>"}),
+    );
+    let main = &created["createdNodeIds"][0];
+    let c = call(&mut h, "create_component", json!({"nodeId": main}));
+    assert_eq!(c["componentId"], *main);
+    assert!(
+        exec::call(
+            &mut h,
+            "create_instance",
+            &json!({"componentId": main, "parentId": main})
+        )
+        .unwrap_err()
+        .contains("own main component")
+    );
+    let made = call(
+        &mut h,
+        "create_instance",
+        json!({"componentId": main, "parentId": artboard["id"]}),
+    );
+    let inst = &made["instanceId"];
+    let inst_node = h.ed.doc.get(num(inst)).unwrap();
+    assert_eq!(inst_node.instance.as_ref().unwrap().main, num(main));
+    let inst_text = json!(exec::node_key(&h.ed, 0, inst_node.children[0]));
+    let override_result = call(
+        &mut h,
+        "set_instance_overrides",
+        json!({"nodeId": inst_text, "text": "Personal"}),
+    );
+    assert_eq!(override_result["updated"], 1);
+    let main_text = h.ed.doc.get(num(main)).unwrap().children[0];
+    let main_text_key = exec::node_key(&h.ed, 0, main_text);
+    call(
+        &mut h,
+        "set_text_content",
+        json!({"updates": [{"nodeId": main_text_key, "textContent": "New"}]}),
+    );
+    assert_eq!(h.ed.doc.get(main_text).unwrap().kind.text().unwrap(), "New");
+    assert_eq!(
+        h.ed.doc.get(num(&inst_text)).unwrap().kind.text().unwrap(),
+        "Personal"
+    );
+    assert!(
+        h.ed.doc
+            .get(num(&inst_text))
+            .unwrap()
+            .instance
+            .as_ref()
+            .unwrap()
+            .overrides
+            .contains(&"text".into())
+    );
+}
+
+#[test]
 fn css_margin_top_offsets_flex_items_and_expands_hug_size() {
     let mut h = host();
     let artboard = call(
