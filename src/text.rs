@@ -183,11 +183,22 @@ pub fn layout_rich(
         .map(|i| ts.char_style(i, font_size, color))
         .collect();
     let ls = ts.letter_spacing;
+    // Tabular digits: each digit is centered in a cell as wide as the widest digit.
+    let mut pad = vec![0.0; chars.len()];
     let adv: Vec<(FaceId, u16, f64)> = chars
         .iter()
         .zip(&styles)
-        .map(|(c, s)| {
-            let (face, g, a) = advance_in(family_face_id(s.weight, s.italic, s.family), *c, s.size);
+        .enumerate()
+        .map(|(i, (c, s))| {
+            let pref = family_face_id(s.weight, s.italic, s.family);
+            let (face, g, mut a) = advance_in(pref, *c, s.size);
+            if ts.tabular_nums && c.is_ascii_digit() {
+                let cell = ('0'..='9')
+                    .map(|d| advance_in(pref, d, s.size).2)
+                    .fold(0.0, f64::max);
+                pad[i] = (cell - a) * 0.5;
+                a = cell;
+            }
             (face, g, a + ls)
         })
         .collect();
@@ -262,7 +273,7 @@ pub fn layout_rich(
                 face,
                 size: st.size,
                 color: st.color,
-                x,
+                x: x + pad[i],
                 baseline,
                 advance: a,
                 char_index: i,
@@ -545,6 +556,9 @@ pub fn layout_node(n: &crate::model::Node) -> Option<TextLayout> {
         if n.text_style.no_wrap { None } else { limit },
         *align,
     );
+    if let Some(max) = n.text_style.line_clamp {
+        clamp_lines(&mut layout, max.max(1) as usize, limit);
+    }
     if n.text_style.overflow_hidden
         && let Some(width) = limit
     {
@@ -555,6 +569,56 @@ pub fn layout_node(n: &crate::model::Node) -> Option<TextLayout> {
         );
     }
     Some(layout)
+}
+
+/// Keep the first `max` lines; when text is cut, the last kept line ends in an ellipsis
+/// (within `width` when the box has one).
+fn clamp_lines(layout: &mut TextLayout, max: usize, width: Option<f64>) {
+    if layout.lines.len() <= max {
+        return;
+    }
+    layout.lines.truncate(max);
+    let last = layout.lines.last_mut().unwrap();
+    layout.glyphs.retain(|g| g.char_index < last.end);
+    layout.height = last.top + last.height;
+    let Some(reference) = layout
+        .glyphs
+        .iter()
+        .rev()
+        .find(|g| g.char_index >= last.start)
+        .copied()
+    else {
+        return;
+    };
+    let (face, gid, advance) = advance_in(reference.face, '…', reference.size);
+    let limit = width.unwrap_or(f64::INFINITY);
+    let start = last.start;
+    // Drop trailing glyphs until the ellipsis fits.
+    while let Some(g) = layout.glyphs.last() {
+        if g.char_index >= start && g.x + g.advance + advance > limit + 1e-9 {
+            layout.glyphs.pop();
+        } else {
+            break;
+        }
+    }
+    let x = layout
+        .glyphs
+        .iter()
+        .rev()
+        .find(|g| g.char_index >= start)
+        .map_or(last.carets[0], |g| g.x + g.advance);
+    layout.glyphs.push(PlacedGlyph {
+        gid,
+        face,
+        x,
+        advance,
+        char_index: last.end.saturating_sub(1),
+        underline: false,
+        strike: false,
+        ..reference
+    });
+    last.width = x + advance;
+    layout.width = layout.lines.iter().map(|l| l.width).fold(0.0, f64::max);
 }
 
 /// Keep whole glyph outlines inside a text box. On a no-wrap line, replace the

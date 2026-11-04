@@ -71,6 +71,11 @@ pub fn from_json(v: &Value) -> Result<Styles, String> {
                             | "flexGrow"
                             | "flexShrink"
                             | "zIndex"
+                            | "order"
+                            | "aspectRatio"
+                            | "lineClamp"
+                            | "webkitLineClamp"
+                            | "WebkitLineClamp"
                             | "roughness"
                             | "seed"
                             | "bowing"
@@ -146,6 +151,9 @@ pub fn split_ws(s: &str) -> Vec<String> {
 /// (use [`percent`]).
 pub fn length(s: &str, font_size: f64) -> Option<f64> {
     let s = s.trim();
+    if s.starts_with("calc(") {
+        return calc(s, font_size, None);
+    }
     let num = |t: &str| t.trim().parse::<f64>().ok().filter(|v| v.is_finite());
     if s == "0" {
         return Some(0.0);
@@ -163,6 +171,50 @@ pub fn length(s: &str, font_size: f64) -> Option<f64> {
         return num(t).map(|v| v * 4.0 / 3.0);
     }
     num(s)
+}
+
+/// Evaluate `calc(...)` with + - * / and parentheses. `%` needs a `basis` (the parent's
+/// size on that axis); without one, a percentage makes the whole value unresolved.
+pub fn calc(s: &str, font_size: f64, basis: Option<f64>) -> Option<f64> {
+    let s = s.trim();
+    let inner = s
+        .strip_prefix("calc(")
+        .or_else(|| s.strip_prefix('('))?
+        .strip_suffix(')')?;
+    let term = |t: &str| -> Option<f64> {
+        if t.starts_with('(') || t.starts_with("calc(") {
+            calc(t, font_size, basis)
+        } else if let Some(p) = percent(t) {
+            basis.map(|b| p * b)
+        } else {
+            length(t, font_size)
+        }
+    };
+    // Sums of products: CSS requires spaces around + and -, so whitespace splits tokens.
+    let tokens = split_ws(inner);
+    let (mut sum, mut prod, mut sign, mut op) = (0.0, None::<f64>, 1.0, '*');
+    for t in tokens.iter() {
+        match t.as_str() {
+            "+" | "-" => {
+                sum += sign * prod?;
+                prod = None;
+                sign = if t == "+" { 1.0 } else { -1.0 };
+            }
+            "*" | "/" => op = t.chars().next().unwrap(),
+            _ => {
+                let v = term(t)?;
+                prod = Some(match prod {
+                    None => v,
+                    Some(p) if op == '/' && v != 0.0 => p / v,
+                    Some(p) if op == '*' => p * v,
+                    _ => return None,
+                });
+                op = '*';
+            }
+        }
+    }
+    let v = sum + sign * prod?;
+    v.is_finite().then_some(v)
 }
 
 pub fn percent(s: &str) -> Option<f64> {
@@ -512,6 +564,8 @@ pub struct Applied {
     /// `right` / `bottom` offsets to resolve once the size is known.
     pub right: Option<f64>,
     pub bottom: Option<f64>,
+    pub left: Option<f64>,
+    pub top: Option<f64>,
 }
 
 fn axis_set(n: &mut Node, axis: usize, s: Sizing) {
@@ -550,6 +604,18 @@ fn set_size(n: &mut Node, axis: usize, v: &str, ctx: &Context, a: &mut Applied, 
                 axis_set(n, axis, Sizing::Fixed);
             } else {
                 axis_set(n, axis, Sizing::Hug);
+            }
+        }
+        // ponytail: calc() with % resolves once against the parent's current size; it does not
+        // follow later parent resizes the way Fill does for a plain 100%.
+        _ if v.starts_with("calc(") => {
+            let basis = ctx.parent_size.map(|s| if axis == 0 { s.0 } else { s.1 });
+            match calc(v, fs, basis) {
+                Some(px) => {
+                    resize_axis(n, axis, px.max(0.0));
+                    axis_set(n, axis, Sizing::Fixed);
+                }
+                None => a.ignored.push(key.into()),
             }
         }
         _ => {
@@ -706,11 +772,10 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
             }
             "minWidth" | "maxWidth" | "minHeight" | "maxHeight" => {
                 let axis = usize::from(k.ends_with("Height"));
-                let size = length(v, fs).or_else(|| {
-                    percent(v)
-                        .zip(ctx.parent_size)
-                        .map(|(p, s)| p * if axis == 0 { s.0 } else { s.1 })
-                });
+                let basis = ctx.parent_size.map(|s| if axis == 0 { s.0 } else { s.1 });
+                let size = calc(v, fs, basis)
+                    .or_else(|| length(v, fs))
+                    .or_else(|| percent(v).zip(basis).map(|(p, b)| p * b));
                 if let Some(size) = size.filter(|x| x.is_finite() && *x >= 0.0) {
                     if k.starts_with("min") {
                         n.layout_child.min_size[axis] = Some(size);
@@ -725,6 +790,7 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
             "left" | "x" => match length(v, fs) {
                 Some(x) => {
                     n.rect.x = x;
+                    a.left = Some(x);
                     true
                 }
                 None => false,
@@ -732,6 +798,7 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
             "top" | "y" => match length(v, fs) {
                 Some(y) => {
                     n.rect.y = y;
+                    a.top = Some(y);
                     true
                 }
                 None => false,
@@ -761,7 +828,18 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
                     layout_mut(n);
                     true
                 }
-                "block" | "inline-block" | "flex" | "inline-flex" => {
+                // Grid → wrapping row; gridTemplateColumns sets equal tracks.
+                "grid" | "inline-grid" if n.is_frame() => {
+                    n.visible = true;
+                    let l = layout_mut(n);
+                    l.direction = Direction::Horizontal;
+                    l.wrap = true;
+                    if l.columns == 0 {
+                        l.columns = 1; // CSS grid without a template is one column.
+                    }
+                    true
+                }
+                "block" | "inline-block" | "flex" | "inline-flex" | "-webkit-box" | "inline" => {
                     n.visible = true;
                     true
                 }
@@ -778,6 +856,32 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
                     Direction::Horizontal
                 };
                 true
+            }
+            "gridTemplateColumns" if n.is_frame() => {
+                // `repeat(3, 1fr)` or `1fr 1fr 1fr`. Tracks of other sizes come out equal,
+                // so they are reported as ignored.
+                let tracks = match lower.strip_prefix("repeat(") {
+                    Some(r) => r
+                        .split_once(',')
+                        .and_then(|(c, t)| {
+                            Some((
+                                c.trim().parse::<u16>().ok()?,
+                                t.trim_end_matches(')').trim().to_string(),
+                            ))
+                        })
+                        .map(|(c, t)| vec![t; c as usize]),
+                    None => Some(split_ws(&lower)),
+                };
+                match tracks.filter(|t| !t.is_empty() && t.len() < 100) {
+                    Some(t) => {
+                        let l = layout_mut(n);
+                        l.direction = Direction::Horizontal;
+                        l.wrap = true;
+                        l.columns = t.len() as u16;
+                        t.iter().all(|t| t.contains("fr"))
+                    }
+                    None => false,
+                }
             }
             "flexWrap" if n.is_frame() => {
                 layout_mut(n).wrap = lower.starts_with("wrap");
@@ -818,24 +922,81 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
                 }
                 None => false,
             },
-            "margin" => match four(v, fs) {
-                Some(m) => {
-                    n.layout_child.margin = m;
-                    true
+            "margin" | "marginInline" | "marginBlock" => {
+                // Each value is a length or `auto`; expand 1–4 values like padding.
+                let parts: Option<Vec<(f64, bool)>> = split_ws(&lower)
+                    .iter()
+                    .map(|p| {
+                        if p == "auto" {
+                            Some((0.0, true))
+                        } else {
+                            length(p, fs).map(|m| (m, false))
+                        }
+                    })
+                    .collect();
+                let sides: Option<[(f64, bool); 4]> =
+                    parts.and_then(|p| match (k.as_str(), p.as_slice()) {
+                        ("marginInline", [a]) => Some([
+                            (n.layout_child.margin[0], n.layout_child.margin_auto[0]),
+                            *a,
+                            (n.layout_child.margin[2], n.layout_child.margin_auto[2]),
+                            *a,
+                        ]),
+                        ("marginInline", [a, b]) => Some([
+                            (n.layout_child.margin[0], n.layout_child.margin_auto[0]),
+                            *b,
+                            (n.layout_child.margin[2], n.layout_child.margin_auto[2]),
+                            *a,
+                        ]),
+                        ("marginBlock", [a]) => Some([
+                            *a,
+                            (n.layout_child.margin[1], n.layout_child.margin_auto[1]),
+                            *a,
+                            (n.layout_child.margin[3], n.layout_child.margin_auto[3]),
+                        ]),
+                        ("marginBlock", [a, b]) => Some([
+                            *a,
+                            (n.layout_child.margin[1], n.layout_child.margin_auto[1]),
+                            *b,
+                            (n.layout_child.margin[3], n.layout_child.margin_auto[3]),
+                        ]),
+                        ("margin", [a]) => Some([*a; 4]),
+                        ("margin", [a, b]) => Some([*a, *b, *a, *b]),
+                        ("margin", [a, b, c]) => Some([*a, *b, *c, *b]),
+                        ("margin", [a, b, c, d]) => Some([*a, *b, *c, *d]),
+                        _ => None,
+                    });
+                match sides {
+                    Some(s) => {
+                        for (i, (m, auto)) in s.into_iter().enumerate() {
+                            n.layout_child.margin[i] = m;
+                            n.layout_child.margin_auto[i] = auto;
+                        }
+                        true
+                    }
+                    None => false,
                 }
-                None => false,
-            },
-            "marginTop" | "marginRight" | "marginBottom" | "marginLeft" => match length(v, fs) {
-                Some(m) => {
-                    let i = ["marginTop", "marginRight", "marginBottom", "marginLeft"]
-                        .iter()
-                        .position(|x| *x == k)
-                        .unwrap();
-                    n.layout_child.margin[i] = m;
+            }
+            "marginTop" | "marginRight" | "marginBottom" | "marginLeft" => {
+                let i = ["marginTop", "marginRight", "marginBottom", "marginLeft"]
+                    .iter()
+                    .position(|x| *x == k)
+                    .unwrap();
+                if lower == "auto" {
+                    n.layout_child.margin[i] = 0.0;
+                    n.layout_child.margin_auto[i] = true;
                     true
+                } else {
+                    match length(v, fs) {
+                        Some(m) => {
+                            n.layout_child.margin[i] = m;
+                            n.layout_child.margin_auto[i] = false;
+                            true
+                        }
+                        None => false,
+                    }
                 }
-                None => false,
-            },
+            }
             "padding" if n.is_frame() => match four(v, fs) {
                 Some(p) => {
                     layout_mut(n).padding = p;
@@ -922,6 +1083,20 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
                     None => false,
                 }
             }
+            "alignSelf" if lower != "stretch" => match (ctx.parent_layout, lower.as_str()) {
+                (Some(_), "auto" | "normal") => {
+                    n.layout_child.align_self = None;
+                    true
+                }
+                (Some(_), _) => match align_of(&lower) {
+                    Some(al) => {
+                        n.layout_child.align_self = Some(al);
+                        true
+                    }
+                    None => false,
+                },
+                _ => false,
+            },
             "alignSelf" => match ctx.parent_layout {
                 Some(pl) if lower == "stretch" => {
                     let ca = if pl.direction == Direction::Horizontal {
@@ -1100,16 +1275,132 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
                     sp.underline = Some(u);
                     sp.strike = Some(s);
                 });
-                true
-            }
-            "fontWeight" | "fontStyle" | "lineHeight" | "letterSpacing" | "textAlign"
-            | "textDecoration" => true, // inherited by text children
-            "border" | "outline" => {
-                if k == "border" {
-                    n.style.border_sides = [None, None, None, None];
+                let mut ok = true;
+                for t in split_ws(&lower) {
+                    match t.as_str() {
+                        "underline" | "line-through" | "none" | "solid" => {}
+                        "wavy" => n.text_style.decoration_wavy = true,
+                        _ => match color(&t) {
+                            Some(c) => n.text_style.decoration_color = Some(c),
+                            None => ok = false, // dotted, dashed, double, overline…
+                        },
+                    }
                 }
+                ok
+            }
+            "textDecorationColor" if is_text => match color(v) {
+                Some(c) => {
+                    n.text_style.decoration_color = Some(c);
+                    true
+                }
+                None => lower == "currentcolor",
+            },
+            "textDecorationStyle" if is_text => {
+                n.text_style.decoration_wavy = lower == "wavy";
+                matches!(lower.as_str(), "solid" | "wavy")
+            }
+            "textTransform" if is_text => {
+                n.text_style.case = match lower.as_str() {
+                    "uppercase" => crate::model::TextCase::Upper,
+                    "lowercase" => crate::model::TextCase::Lower,
+                    "capitalize" => crate::model::TextCase::Capitalize,
+                    _ => crate::model::TextCase::None,
+                };
+                let case = n.text_style.case;
+                if let Some(t) = n.kind.text_mut() {
+                    *t = case.apply(t);
+                }
+                matches!(
+                    lower.as_str(),
+                    "uppercase" | "lowercase" | "capitalize" | "none"
+                )
+            }
+            "fontVariantNumeric" if is_text => {
+                n.text_style.tabular_nums = lower.contains("tabular-nums");
+                split_ws(&lower).iter().all(|t| {
+                    matches!(
+                        t.as_str(),
+                        "tabular-nums" | "proportional-nums" | "normal" | "lining-nums"
+                    )
+                })
+            }
+            "lineClamp" | "webkitLineClamp" | "WebkitLineClamp" if is_text => {
+                if lower == "none" {
+                    n.text_style.line_clamp = None;
+                    true
+                } else {
+                    match lower.parse::<u16>() {
+                        Ok(c) if c > 0 => {
+                            n.text_style.line_clamp = Some(c);
+                            true
+                        }
+                        _ => false,
+                    }
+                }
+            }
+            "webkitBoxOrient" | "WebkitBoxOrient" => true,
+            "order" => match lower.parse::<i32>() {
+                Ok(o) => {
+                    n.layout_child.order = o;
+                    true
+                }
+                Err(_) => false,
+            },
+            "aspectRatio" => {
+                let ratio = match lower.split_once('/') {
+                    Some((w, h)) => w
+                        .trim()
+                        .parse::<f64>()
+                        .ok()
+                        .zip(h.trim().parse::<f64>().ok())
+                        .map(|(w, h)| w / h),
+                    None => lower.parse::<f64>().ok(),
+                };
+                if lower == "auto" {
+                    n.layout_child.aspect = None;
+                    true
+                } else if let Some(r) = ratio.filter(|r| r.is_finite() && *r > 0.0) {
+                    n.layout_child.aspect = Some(r);
+                    true
+                } else {
+                    false
+                }
+            }
+            "fontWeight"
+            | "fontStyle"
+            | "lineHeight"
+            | "letterSpacing"
+            | "textAlign"
+            | "textDecoration"
+            | "textDecorationColor"
+            | "textDecorationStyle"
+            | "textTransform"
+            | "fontVariantNumeric"
+            | "lineClamp"
+            | "webkitLineClamp"
+            | "WebkitLineClamp" => true, // inherited by text children
+            "border" => {
+                n.style.border_sides = [None, None, None, None];
                 apply_border(n, v, fs)
             }
+            // An outline draws outside the box and takes no layout space. It shares the one
+            // outline stroke, so a box that already has a full border keeps the border.
+            "outline" => {
+                let has_border = n.style.stroke.is_some()
+                    && n.style.stroke_width > 0.0
+                    && n.style.stroke_align == crate::model::StrokeAlign::Inside;
+                if matches!(lower.as_str(), "none" | "0" | "0px") {
+                    true
+                } else if has_border {
+                    false
+                } else if apply_border(n, v, fs) {
+                    n.style.stroke_align = crate::model::StrokeAlign::Outside;
+                    true
+                } else {
+                    false
+                }
+            }
+            "outlineOffset" => length(v, fs) == Some(0.0),
             "borderTop" | "borderRight" | "borderBottom" | "borderLeft" => {
                 let side = ["borderTop", "borderRight", "borderBottom", "borderLeft"]
                     .iter()
@@ -1265,10 +1556,45 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
             a.ignored.push(k.clone());
         }
     }
+    if let Some(ar) = n.layout_child.aspect {
+        n.rect.h = n.rect.w / ar; // layout keeps this up to date when the width changes
+    }
     n.rect.w = n.layout_child.constrain(0, n.rect.w);
     n.rect.h = n.layout_child.constrain(1, n.rect.h);
     if let Some(l) = &mut n.layout {
         l.border_box = true;
+    }
+    // In flow, offsets only mean something with `position: relative` (CSS ignores them
+    // on static boxes, so say so instead of dropping them silently).
+    if ctx.parent_layout.is_some() && !n.layout_child.absolute {
+        let pos = styles
+            .iter()
+            .rev()
+            .find(|(k, _)| k == "position")
+            .map(|(_, v)| v.trim());
+        let relative =
+            pos == Some("relative") || pos.is_none() && n.layout_child.offset != [0.0, 0.0];
+        if pos.is_some_and(|p| p != "relative") {
+            n.layout_child.offset = [0.0, 0.0];
+        }
+        let any = a.left.is_some() || a.top.is_some() || a.right.is_some() || a.bottom.is_some();
+        if any && relative {
+            let o = &mut n.layout_child.offset;
+            if let Some(x) = a.left.or(a.right.map(|r| -r)) {
+                o[0] = x;
+            }
+            if let Some(y) = a.top.or(a.bottom.map(|b| -b)) {
+                o[1] = y;
+            }
+        } else if any {
+            for k in ["left", "top", "right", "bottom"] {
+                if styles.iter().any(|(s, _)| s == k) && !a.ignored.iter().any(|i| i == k) {
+                    a.ignored.push(k.into());
+                }
+            }
+        }
+        a.right = None;
+        a.bottom = None;
     }
     a
 }
@@ -1464,6 +1790,10 @@ pub fn computed(n: &Node, parent_layout: Option<&AutoLayout>, is_root: bool) -> 
     if !in_flow {
         put("left", px(n.rect.x));
         put("top", px(n.rect.y));
+    } else if n.layout_child.offset != [0.0, 0.0] {
+        put("position", "relative".into());
+        put("left", px(n.layout_child.offset[0]));
+        put("top", px(n.layout_child.offset[1]));
     }
     let size_css = |axis: usize, v: f64| match n.layout_child.sizing[axis] {
         Sizing::Hug => "fit-content".to_string(),
@@ -1483,6 +1813,25 @@ pub fn computed(n: &Node, parent_layout: Option<&AutoLayout>, is_root: bool) -> 
         if n.text_style.ellipsis {
             put("textOverflow", "ellipsis".into());
         }
+        let ts = &n.text_style;
+        match ts.case {
+            crate::model::TextCase::Upper => put("textTransform", "uppercase".into()),
+            crate::model::TextCase::Lower => put("textTransform", "lowercase".into()),
+            crate::model::TextCase::Capitalize => put("textTransform", "capitalize".into()),
+            crate::model::TextCase::None => {}
+        }
+        if ts.tabular_nums {
+            put("fontVariantNumeric", "tabular-nums".into());
+        }
+        if let Some(c) = ts.line_clamp {
+            put("lineClamp", c.to_string());
+        }
+        if let Some(c) = ts.decoration_color {
+            put("textDecorationColor", color_css(c));
+        }
+        if ts.decoration_wavy {
+            put("textDecorationStyle", "wavy".into());
+        }
         if *auto_width {
             put("width", "fit-content".into());
         } else {
@@ -1494,11 +1843,11 @@ pub fn computed(n: &Node, parent_layout: Option<&AutoLayout>, is_root: bool) -> 
         put("height", size_css(1, n.rect.h));
     }
     for (i, m) in n.layout_child.margin.iter().enumerate() {
-        if *m != 0.0 {
-            put(
-                ["marginTop", "marginRight", "marginBottom", "marginLeft"][i],
-                px(*m),
-            );
+        let key = ["marginTop", "marginRight", "marginBottom", "marginLeft"][i];
+        if n.layout_child.margin_auto[i] {
+            put(key, "auto".into());
+        } else if *m != 0.0 {
+            put(key, px(*m));
         }
     }
     for axis in [0, 1] {
@@ -1522,11 +1871,24 @@ pub fn computed(n: &Node, parent_layout: Option<&AutoLayout>, is_root: bool) -> 
         }
         if n.layout_child.sizing[1 - ma] == Sizing::Fill {
             put("alignSelf", "stretch".into());
+        } else if let Some(al) = n.layout_child.align_self {
+            put("alignSelf", align_css(al).into());
         }
         put("flexShrink", "0".into());
     }
+    if n.layout_child.order != 0 {
+        put("order", n.layout_child.order.to_string());
+    }
+    if let Some(ar) = n.layout_child.aspect {
+        put("aspectRatio", format!("{}", (ar * 1000.0).round() / 1000.0));
+    }
     if let Some(l) = &n.layout {
-        put("display", "flex".into());
+        if l.columns > 0 {
+            put("display", "grid".into());
+            put("gridTemplateColumns", format!("repeat({}, 1fr)", l.columns));
+        } else {
+            put("display", "flex".into());
+        }
         put(
             "flexDirection",
             if l.direction == Direction::Vertical {
@@ -1669,8 +2031,13 @@ pub fn computed(n: &Node, parent_layout: Option<&AutoLayout>, is_root: bool) -> 
         } else {
             "dashed"
         };
+        let key = if n.style.stroke_align == crate::model::StrokeAlign::Outside {
+            "outline"
+        } else {
+            "border"
+        };
         put(
-            "border",
+            key,
             format!("{} {kind} {}", px(n.style.stroke_width), color_css(s)),
         );
     }

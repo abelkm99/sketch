@@ -1795,3 +1795,242 @@ fn inset_shadow_draws_a_ring_inside_the_box() {
         "ring leaks past the rounded corner: {outside_corner:?}"
     );
 }
+
+/// Created layers by name (text layers are named by their content).
+fn by_name(h: &exec::SessionHost, created: &Value, name: &str) -> sketch_rs::model::Node {
+    let c = created["created"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == name)
+        .unwrap_or_else(|| panic!("no layer {name} in {created}"));
+    h.ed.doc.get(num(&c["id"])).unwrap().clone()
+}
+
+fn write(h: &mut exec::SessionHost, w: u32, html: &str) -> Value {
+    let ab = call(
+        h,
+        "create_artboard",
+        json!({"name": "T", "styles": {"width": format!("{w}px"), "height": "400px"}}),
+    );
+    call(
+        h,
+        "write_html",
+        json!({"targetNodeId": ab["id"], "mode": "insert-children", "html": html}),
+    )
+}
+
+#[test]
+fn grid_keeps_its_cells_in_equal_tracks() {
+    let mut h = host();
+    let c = write(
+        &mut h,
+        400,
+        "<div layer-name='Grid' style='display:grid;grid-template-columns:repeat(2, 1fr);gap:10px;width:210px'><span>a</span><span>b</span><span>c</span><span>d</span></div>\
+         <div layer-name='Stack' style='display:grid;width:100px'><span>e</span><span>f</span></div>\
+         <div layer-name='Boxes' style='display:grid;grid-template-columns:repeat(2, 1fr)'><div layer-name='Cell' style='padding:8px;background:#fff'><span>g</span></div><div style='padding:8px;background:#fff'><span>h</span></div></div>",
+    );
+    let cell = by_name(&h, &c, "Cell");
+    assert!(
+        cell.rect.h > 16.0,
+        "box cells keep their content height: {:?}",
+        cell.rect
+    );
+    assert!(by_name(&h, &c, "Boxes").rect.h >= cell.rect.h);
+    assert!(c.get("ignoredStyles").is_none(), "{c}");
+    let (a, b, cc, d) = (
+        by_name(&h, &c, "a"),
+        by_name(&h, &c, "b"),
+        by_name(&h, &c, "c"),
+        by_name(&h, &c, "d"),
+    );
+    assert_eq!((a.rect.x, a.rect.w), (0.0, 100.0));
+    assert_eq!((b.rect.x, b.rect.y), (110.0, a.rect.y));
+    assert_eq!(cc.rect.x, 0.0);
+    assert!(
+        cc.rect.y >= a.rect.y + a.rect.h + 10.0 - 0.01,
+        "{:?}",
+        cc.rect
+    );
+    assert_eq!(d.rect.x, 110.0);
+    // No template: one column.
+    let (e, f) = (by_name(&h, &c, "e"), by_name(&h, &c, "f"));
+    assert_eq!(e.rect.x, f.rect.x);
+    assert!(f.rect.y > e.rect.y);
+    let grid = &c["created"][0]["id"];
+    let s = call(&mut h, "get_computed_styles", json!({"nodeIds": [grid]}));
+    assert_eq!(
+        s[grid.as_str().unwrap()]["gridTemplateColumns"],
+        "repeat(2, 1fr)"
+    );
+}
+
+#[test]
+fn relative_offsets_move_one_item_and_static_offsets_are_reported() {
+    let mut h = host();
+    let c = write(
+        &mut h,
+        400,
+        "<div style='display:flex'><span>A</span><span style='position:relative;top:4px;left:2px'>B</span><span>C</span></div><span style='top:9px'>Static</span>",
+    );
+    let (a, b, cc) = (
+        by_name(&h, &c, "A"),
+        by_name(&h, &c, "B"),
+        by_name(&h, &c, "C"),
+    );
+    assert_eq!(b.rect.y, a.rect.y + 4.0);
+    assert!((b.rect.x - (a.rect.w + 2.0)).abs() < 0.01, "{:?}", b.rect);
+    assert!(
+        (cc.rect.x - (a.rect.w + b.rect.w)).abs() < 0.01,
+        "siblings stay put"
+    );
+    assert!(c["ignoredStyles"].to_string().contains("top"), "{c}");
+}
+
+#[test]
+fn outline_draws_outside_without_moving_children() {
+    let mut h = host();
+    let c = write(
+        &mut h,
+        400,
+        "<div layer-name='Ring' style='display:flex;outline:2px solid #2563eb'><div layer-name='Dot' style='width:10px;height:10px;background:#000'></div></div>",
+    );
+    let (ring, dot) = (by_name(&h, &c, "Ring"), by_name(&h, &c, "Dot"));
+    assert_eq!(
+        (dot.rect.x, dot.rect.y),
+        (0.0, 0.0),
+        "outline takes no space"
+    );
+    assert_eq!(ring.rect.h, 10.0);
+    assert_eq!(
+        ring.style.stroke_align,
+        sketch_rs::model::StrokeAlign::Outside
+    );
+    let id = &c["created"][0]["id"];
+    let s = call(&mut h, "get_computed_styles", json!({"nodeIds": [id]}));
+    assert!(
+        s[id.as_str().unwrap()]["outline"]
+            .as_str()
+            .unwrap()
+            .starts_with("2px solid"),
+        "{s}"
+    );
+}
+
+#[test]
+fn wavy_colored_underline_keeps_its_style() {
+    let mut h = host();
+    let c = write(
+        &mut h,
+        400,
+        "<span style='text-decoration:underline wavy #ff0000'>Check this</span><span style='text-decoration:underline dotted'>Dots</span>",
+    );
+    assert_eq!(
+        c["ignoredStyles"],
+        json!(["textDecoration"]),
+        "dotted is reported: {c}"
+    );
+    let n = by_name(&h, &c, "Check this");
+    assert!(n.text_style.decoration_wavy);
+    let wr = h.ed.doc.world_rect(n.id).unwrap();
+    let ops = sketch_rs::render::draw::node_draw(&n, wr, 1.0).ops;
+    assert!(ops.iter().any(|o| matches!(o, sketch_rs::render::draw::DrawOp::Stroke { color, .. } if color[0] > 0.99 && color[1] < 0.01)));
+}
+
+#[test]
+fn auto_margins_align_self_calc_order_and_aspect_ratio() {
+    let mut h = host();
+    let c = write(
+        &mut h,
+        500,
+        "<div style='display:flex;width:300px'><span>Left</span><span style='margin-left:auto'>Right</span></div>\
+         <div style='display:flex;flex-direction:column;width:300px'><div layer-name='Mid' style='width:100px;height:10px;margin:0 auto'></div></div>\
+         <div style='display:flex;height:100px'><div layer-name='C' style='width:10px;height:20px;align-self:center'></div><div layer-name='E' style='width:10px;height:20px;align-self:flex-end'></div></div>\
+         <div layer-name='Calc' style='width:calc(100% - 200px);height:10px;padding:calc(4px * 2)'></div>\
+         <div style='display:flex'><span style='order:2'>x</span><span>y</span><span style='order:-1'>z</span></div>\
+         <div style='display:flex;flex-direction:column;width:200px'><div layer-name='Wide' style='aspect-ratio:2;background:#000'></div></div>\
+         <div layer-name='Video' style='width:160px;aspect-ratio:16 / 9'></div>",
+    );
+    assert!(c.get("ignoredStyles").is_none(), "{c}");
+    let right = by_name(&h, &c, "Right");
+    assert!(
+        (right.rect.x + right.rect.w - 300.0).abs() < 0.01,
+        "{:?}",
+        right.rect
+    );
+    assert_eq!(by_name(&h, &c, "Mid").rect.x, 100.0);
+    assert_eq!(by_name(&h, &c, "C").rect.y, 40.0);
+    assert_eq!(by_name(&h, &c, "E").rect.y, 80.0);
+    let calc = by_name(&h, &c, "Calc");
+    assert_eq!(calc.rect.w, 300.0);
+    assert_eq!(calc.layout.unwrap().padding, [8.0; 4]);
+    let (x, y, z) = (
+        by_name(&h, &c, "x"),
+        by_name(&h, &c, "y"),
+        by_name(&h, &c, "z"),
+    );
+    assert!(
+        z.rect.x < y.rect.x && y.rect.x < x.rect.x,
+        "{:?} {:?} {:?}",
+        z.rect,
+        y.rect,
+        x.rect
+    );
+    let wide = by_name(&h, &c, "Wide");
+    assert_eq!((wide.rect.w, wide.rect.h), (200.0, 100.0));
+    assert_eq!(by_name(&h, &c, "Video").rect.h, 90.0);
+}
+
+#[test]
+fn text_transform_tabular_digits_and_line_clamp() {
+    let mut h = host();
+    let c = write(
+        &mut h,
+        500,
+        "<span style='text-transform:uppercase'>needs your call</span>\
+         <span style='font-variant-numeric:tabular-nums'>1111</span><span style='font-variant-numeric:tabular-nums'>0000</span>\
+         <span>1111</span><span>0000</span>\
+         <p layer-name='Clamp' style='width:120px;-webkit-line-clamp:2;display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden'>A long description that keeps going well past two lines of text</p>",
+    );
+    assert!(c.get("ignoredStyles").is_none(), "{c}");
+    let up = by_name(&h, &c, "needs your call");
+    assert_eq!(up.kind.text().unwrap(), "NEEDS YOUR CALL");
+    let up_id = &c["created"][0]["id"];
+    call(
+        &mut h,
+        "set_text_content",
+        json!({"updates": [{"nodeId": up_id, "textContent": "approved"}]}),
+    );
+    assert_eq!(
+        h.ed.doc.get(num(up_id)).unwrap().kind.text().unwrap(),
+        "APPROVED"
+    );
+    let widths: Vec<f64> = c["created"].as_array().unwrap()[1..5]
+        .iter()
+        .map(|x| {
+            sketch_rs::text::layout_node(h.ed.doc.get(num(&x["id"])).unwrap())
+                .unwrap()
+                .width
+        })
+        .collect();
+    assert!((widths[0] - widths[1]).abs() < 0.01, "tabular: {widths:?}");
+    assert!(
+        (widths[2] - widths[3]).abs() > 1.0,
+        "proportional digits differ: {widths:?}"
+    );
+    let clamp = by_name(&h, &c, "Clamp");
+    let l = sketch_rs::text::layout_node(&clamp).unwrap();
+    assert_eq!(l.lines.len(), 2);
+    let last = l.glyphs.last().unwrap();
+    assert_eq!(
+        last.gid,
+        sketch_rs::text::face_of(last.face)
+            .glyph_index('…')
+            .unwrap()
+            .0
+    );
+    assert!(
+        (clamp.rect.h - l.height.ceil()).abs() < 0.01,
+        "box hugs two lines"
+    );
+}

@@ -535,9 +535,15 @@ background-image (url(), linear-gradient(), radial-gradient()), background-size/
 border, border-color/width/style, border-radius (1–4 values), opacity, mix-blend-mode, color,
 font-size, font-weight, font-style, line-height, letter-spacing, text-align, text-decoration,
 box-shadow (comma-separated layers, outer and inset), transform: rotate() and rotate
-(the layer and its children turn when drawn; layout keeps the unrotated box, like CSS).
-Ignored (reported back): grid, other transforms (translate, scale), filters,
-transitions.";
+(the layer and its children turn when drawn; layout keeps the unrotated box, like CSS),
+outline (drawn outside, takes no space), position:relative with top/left/right/bottom,
+margin/margin-inline auto, align-self, order, aspect-ratio, calc() (+ - * /; % resolves
+against the parent's size once), display:grid with grid-template-columns of equal fr tracks
+(other track sizes come out equal and are reported), text-transform,
+font-variant-numeric: tabular-nums, line-clamp / -webkit-line-clamp, text-decoration
+color and wavy style.
+Ignored (reported back): grid track sizes other than fr, grid areas/spans, other transforms
+(translate, scale), filters, backdrop blur, transitions, dotted/dashed/double underlines.";
 
 pub const GUIDE_WHITEBOARD: &str = "\
 # Whiteboard elements

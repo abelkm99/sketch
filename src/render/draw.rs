@@ -557,15 +557,41 @@ fn text_ops(n: &Node, wr: Rect, opacity: f64, ops: &mut Vec<DrawOp>) {
             glyphs,
         });
     }
-    // Underline / strikethrough as thin rectangles.
+    // Underline / strikethrough as thin rectangles, or sine waves for `wavy`.
+    let ts = &n.text_style;
     for g in l.glyphs.iter().filter(|g| g.underline || g.strike) {
         let th = (g.size / 14.0).max(0.5);
+        let color = rgba(ts.decoration_color.unwrap_or(g.color), opacity);
         for (on, dy) in [(g.underline, g.size * 0.12), (g.strike, -g.size * 0.28)] {
-            if on {
-                let r = Rect::new(o.x + g.x, o.y + g.baseline + dy, g.advance, th);
+            if !on {
+                continue;
+            }
+            let (x0, y) = (o.x + g.x, o.y + g.baseline + dy);
+            if ts.decoration_wavy {
+                // Phase comes from the absolute x, so waves join up across glyphs.
+                let (amp, wave) = (th * 1.5, th * 6.0);
+                let steps = ((g.advance / wave * 8.0).ceil() as usize).max(2);
+                let pts: Vec<V2> = (0..=steps)
+                    .map(|i| {
+                        let x = x0 + g.advance * i as f64 / steps as f64;
+                        v2(
+                            x,
+                            y + th * 1.5 + amp * (x / wave * std::f64::consts::TAU).sin(),
+                        )
+                    })
+                    .collect();
+                ops.push(DrawOp::Stroke {
+                    path: VPath::polyline(&pts, false),
+                    color,
+                    width: th,
+                    cap: Cap::Butt,
+                    join: Join::Round,
+                    dash: Vec::new(),
+                });
+            } else {
                 ops.push(DrawOp::Fill {
-                    path: vector::rounded_rect(r, [0.0; 4]),
-                    paint: PaintSpec::Solid(rgba(g.color, opacity)),
+                    path: vector::rounded_rect(Rect::new(x0, y, g.advance, th), [0.0; 4]),
+                    paint: PaintSpec::Solid(color),
                     even_odd: false,
                 });
             }

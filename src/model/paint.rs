@@ -312,6 +312,60 @@ pub struct TextStyle {
     pub letter_spacing: f64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub spans: Vec<TextSpan>,
+    /// CSS text-transform, applied to the stored text when it is set.
+    #[serde(skip_serializing_if = "is_default_case")]
+    pub case: TextCase,
+    /// CSS `font-variant-numeric: tabular-nums`: every digit gets the same advance.
+    pub tabular_nums: bool,
+    /// CSS line-clamp: show at most this many lines, the last one ending in an ellipsis.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_clamp: Option<u16>,
+    /// Underline / strikethrough color (None = text color) and wavy style.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decoration_color: Option<Color>,
+    pub decoration_wavy: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextCase {
+    #[default]
+    None,
+    Upper,
+    Lower,
+    Capitalize,
+}
+
+fn is_default_case(c: &TextCase) -> bool {
+    *c == TextCase::None
+}
+
+impl TextCase {
+    /// Change case one char at a time, keeping the char count so rich-text runs still line up.
+    pub fn apply(self, text: &str) -> String {
+        let one = |c: char, up: bool| {
+            let mut m: Vec<char> = if up {
+                c.to_uppercase().collect()
+            } else {
+                c.to_lowercase().collect()
+            };
+            if m.len() == 1 { m.pop().unwrap() } else { c }
+        };
+        let mut word_start = true;
+        text.chars()
+            .map(|c| {
+                let out = match self {
+                    TextCase::None => c,
+                    TextCase::Upper => one(c, true),
+                    TextCase::Lower => one(c, false),
+                    TextCase::Capitalize if word_start => one(c, true),
+                    TextCase::Capitalize => c,
+                };
+                word_start = c.is_whitespace();
+                out
+            })
+            .collect()
+    }
 }
 
 impl TextStyle {
@@ -522,6 +576,13 @@ pub struct AutoLayout {
     /// CSS box model: inside borders inset the children like extra padding.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub border_box: bool,
+    /// CSS grid column count (0 = flex). Children fill equal tracks, row by row.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub columns: u16,
+}
+
+fn is_zero(n: &u16) -> bool {
+    *n == 0
 }
 
 impl Default for AutoLayout {
@@ -536,6 +597,7 @@ impl Default for AutoLayout {
             align_main: Align::Start,
             align_cross: Align::Start,
             border_box: false,
+            columns: 0,
         }
     }
 }
@@ -586,6 +648,16 @@ pub struct LayoutChild {
     /// Ignore auto layout (positioned by constraints instead).
     pub absolute: bool,
     pub constraints: Constraints,
+    /// CSS `position: relative` shift (x, y), applied after layout without moving siblings.
+    pub offset: [f64; 2],
+    /// CSS `auto` margins (top, right, bottom, left): they share the line's free space.
+    pub margin_auto: [bool; 4],
+    /// CSS `align-self` (None = the parent's align-items).
+    pub align_self: Option<Align>,
+    /// CSS `order`: flow position among siblings (stable for equal values).
+    pub order: i32,
+    /// CSS `aspect-ratio` (width / height): layout derives the height from the width.
+    pub aspect: Option<f64>,
 }
 
 impl LayoutChild {

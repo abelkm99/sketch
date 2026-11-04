@@ -1403,6 +1403,13 @@ const INHERITED: &[&str] = &[
     "fontFamily",
     "whiteSpace",
     "textDecoration",
+    "textDecorationColor",
+    "textDecorationStyle",
+    "textTransform",
+    "fontVariantNumeric",
+    "lineClamp",
+    "webkitLineClamp",
+    "WebkitLineClamp",
 ];
 
 fn get<'s>(st: &'s Styles, k: &str) -> Option<&'s str> {
@@ -1450,7 +1457,7 @@ fn text_only(el: &Element) -> bool {
 }
 
 fn is_flex(st: &Styles) -> bool {
-    get(st, "display").is_some_and(|d| d.contains("flex"))
+    get(st, "display").is_some_and(|d| d.contains("flex") || d.contains("grid"))
 }
 
 fn has_element_children(el: &Element) -> bool {
@@ -1697,7 +1704,7 @@ impl Builder<'_, '_> {
                     k.starts_with("background")
                         || k.starts_with("border") && v != "none" && v != "0"
                         || k.starts_with("padding")
-                        || k == "display" && v.contains("flex")
+                        || k == "display" && (v.contains("flex") || v.contains("grid"))
                 }) || matches!(el.tag.as_str(), "button" | "li" | "a")
                     && own.iter().any(|(k, _)| k.starts_with("padding"));
                 if boxy {
@@ -1802,7 +1809,7 @@ impl Builder<'_, '_> {
         n.style.fills.clear();
         n.style.variables = parent.variables.clone();
         n.name = Self::layer_name(el).unwrap_or_else(|| el.tag.clone());
-        let flex = get(own, "display").is_some_and(|d| d.contains("flex"));
+        let flex = is_flex(own);
         n.layout = Some(AutoLayout {
             direction: if flex {
                 Direction::Horizontal
@@ -2588,7 +2595,7 @@ fn set_text_content(ed: &mut Editor, a: &Args) -> ToolResult {
                 }
             };
             let node = tx.node_mut(id).unwrap();
-            *node.kind.text_mut().unwrap() = content;
+            *node.kind.text_mut().unwrap() = node.text_style.case.apply(&content);
             node.text_style.spans.clear();
             if let Some(chars) = runs {
                 apply_runs(&mut node.text_style, &chars);
