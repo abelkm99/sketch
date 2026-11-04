@@ -420,6 +420,42 @@ fn screenshot_returns_png() {
     assert!(p[0] > 240 && p[1] < 20 && p[2] < 20, "{p:?}");
 }
 
+#[test]
+fn screenshot_of_layer_inside_clipping_artboard() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Desktop", "styles": {"width": 200, "height": 100}}),
+    );
+    let card = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+               "html": "<div layer-name=\"Card\" style=\"width:60px;height:30px;background:#ff0000\"></div>"}),
+    );
+    let id = card["createdNodeIds"][0].clone();
+    let node = num(&id);
+    assert_eq!(
+        sketch_rs::io::svg::export_bounds(&h.ed.doc, &[node]),
+        h.ed.doc.world_rect(node),
+        "the selected frame should not be excluded by its artboard's clip",
+    );
+    if sketch_rs::render::gpu::Headless::new().is_err() {
+        eprintln!("no GPU adapter; skipping screenshot assertions");
+        return;
+    }
+    let outs = exec::call(&mut h, "get_screenshot", &json!({"nodeId": id})).unwrap();
+    let Out::Image { data, mime } = &outs[0] else {
+        panic!("expected screenshot")
+    };
+    assert_eq!(mime, "image/png");
+    let img = image::load_from_memory(data).unwrap().to_rgba8();
+    assert_eq!(img.dimensions(), (60, 30));
+    let p = img.get_pixel(30, 15).0;
+    assert!(p[0] > 240 && p[1] < 20 && p[2] < 20, "{p:?}");
+}
+
 // ------------------------------------------------------------------------------ end to end
 
 /// Serve MCP on a free port from a thread that owns a headless session, like the app does.
