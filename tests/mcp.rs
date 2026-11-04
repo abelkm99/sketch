@@ -89,13 +89,13 @@ fn artboard_and_html_become_auto_layout_frames_and_text() {
     assert_eq!((text.as_str(), *font_size), ("Welcome back", 32.0));
     assert!(title.text_style.bold);
     assert_eq!(title.style.fill(), Some(Color::rgb(0x11, 0x11, 0x11)));
-    // Text fills the card's inner width and sits inside its padding.
+    // Text fills the card's inner width and sits inside its 1px border and padding.
     assert!(
-        (title.rect.w - (342.0 - 32.0)).abs() < 0.5,
+        (title.rect.w - (342.0 - 34.0)).abs() < 0.5,
         "{:?}",
         title.rect
     );
-    assert_eq!((title.rect.x, title.rect.y), (16.0, 16.0));
+    assert_eq!((title.rect.x, title.rect.y), (17.0, 17.0));
 
     let body = doc.get(c.children[1]).unwrap();
     let NodeKind::Text { text, .. } = &body.kind else {
@@ -128,8 +128,8 @@ fn artboard_and_html_become_auto_layout_frames_and_text() {
         button.rect
     );
 
-    // The card hugs its content: padding + three children + two gaps.
-    let want = 16.0 + title.rect.h + 8.0 + body.rect.h + 8.0 + 44.0 + 16.0;
+    // The card hugs its content: border + padding + three children + two gaps.
+    let want = 2.0 + 16.0 + title.rect.h + 8.0 + body.rect.h + 8.0 + 44.0 + 16.0;
     assert!((c.rect.h - want).abs() < 0.5, "{} vs {want}", c.rect.h);
 
     // One undo step removes the whole write.
@@ -702,7 +702,7 @@ fn replacing_text_clears_old_runs_and_html_rebuilds_them() {
     call(
         &mut h,
         "set_text_content",
-        json!({"updates": [{"nodeId": id, "html": "Bill <b>14285982</b> <span style='color:#ff0000'>paid</span>"}]}),
+        json!({"updates": [{"nodeId": id, "textContent": "", "html": "Bill <b>14285982</b> <span style='color:#ff0000'>paid</span>"}]}),
     );
     let rich = h.ed.doc.get(num(id)).unwrap();
     assert_eq!(rich.kind.text().unwrap(), "Bill 14285982 paid");
@@ -1522,4 +1522,77 @@ fn agent_design_screenshot() {
         "artboard hugs its content: {:?}",
         ab_node.rect
     );
+}
+
+#[test]
+fn ellipsis_text_sized_by_its_row_stays_inside_the_cell() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Table", "styles": {"width": 300, "height": 100}}),
+    );
+    let ell = "white-space:nowrap;overflow:hidden;text-overflow:ellipsis";
+    let result = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+        "html": format!("<div style='display:flex;width:240px'>\
+            <div layer-name='Fixed' style='display:flex;flex-direction:column;width:100px'><span layer-name='A' style='{ell}'>A very long delivery note</span></div>\
+            <div layer-name='Row' style='display:flex;flex:1'><span layer-name='B' style='flex:1;{ell}'>Another very long delivery note here</span></div>\
+            <div layer-name='Shrink' style='display:flex;width:40px'><span layer-name='C' style='{ell}'>Third long note</span></div>\
+            </div>")}),
+    );
+    for created in result["created"].as_array().unwrap() {
+        if !["A", "B", "C"].contains(&created["name"].as_str().unwrap()) {
+            continue;
+        }
+        let n = h.ed.doc.get(num(&created["id"])).unwrap();
+        let parent = h.ed.doc.get(num(&created["parent"])).unwrap();
+        assert!(
+            n.rect.w <= parent.rect.w + 0.01,
+            "{} {} > {}",
+            created["name"],
+            n.rect.w,
+            parent.rect.w
+        );
+        let layout = sketch_rs::text::layout_node(n).unwrap();
+        let last = layout.glyphs.last().unwrap();
+        assert_eq!(
+            last.gid,
+            sketch_rs::text::face_of(last.face)
+                .glyph_index('…')
+                .unwrap()
+                .0,
+            "{} has no ellipsis",
+            created["name"]
+        );
+        assert!(last.x + last.advance <= n.rect.w + 0.01);
+    }
+}
+
+#[test]
+fn divider_stays_inside_the_border_of_a_rounded_box() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Card", "styles": {"width": 300, "height": 200}}),
+    );
+    let result = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+        "html": "<div layer-name='Box' style='display:flex;flex-direction:column;width:200px;border:2px solid #000;border-radius:12px;overflow:hidden'><div style='height:40px'></div><div layer-name='Divider' style='height:1px;background:#f00'></div><div style='height:40px'></div></div>"}),
+    );
+    let created = result["created"].as_array().unwrap();
+    let find = |name: &str| {
+        let c = created.iter().find(|c| c["name"] == name).unwrap();
+        h.ed.doc.get(num(&c["id"])).unwrap().clone()
+    };
+    let (b, d) = (find("Box"), find("Divider"));
+    assert_eq!(b.rect.w, 200.0);
+    assert_eq!(d.rect.x, 2.0, "divider starts inside the left border");
+    assert_eq!(d.rect.w, 196.0, "divider ends inside the right border");
+    assert_eq!(b.rect.h, 85.0, "border adds to hug height");
 }

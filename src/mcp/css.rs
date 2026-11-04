@@ -1253,6 +1253,9 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
     }
     n.rect.w = n.layout_child.constrain(0, n.rect.w);
     n.rect.h = n.layout_child.constrain(1, n.rect.h);
+    if let Some(l) = &mut n.layout {
+        l.border_box = true;
+    }
     a
 }
 

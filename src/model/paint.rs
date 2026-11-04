@@ -519,6 +519,9 @@ pub struct AutoLayout {
     pub padding: [f64; 4],
     pub align_main: Align,
     pub align_cross: Align,
+    /// CSS box model: inside borders inset the children like extra padding.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub border_box: bool,
 }
 
 impl Default for AutoLayout {
@@ -532,6 +535,7 @@ impl Default for AutoLayout {
             padding: [10.0; 4],
             align_main: Align::Start,
             align_cross: Align::Start,
+            border_box: false,
         }
     }
 }

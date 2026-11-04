@@ -1596,12 +1596,11 @@ impl Builder<'_, '_> {
             || matches!(get(styles, "position"), Some("absolute" | "fixed"));
         if parent.stretch && !explicit {
             n.layout_child.sizing[ca] = Sizing::Fill;
-            if parent.definite[ca] {
-                if ca == 0
-                    && let NodeKind::Text { auto_width, .. } = &mut n.kind
-                {
-                    *auto_width = false;
-                }
+            if parent.definite[ca]
+                && ca == 0
+                && let NodeKind::Text { auto_width, .. } = &mut n.kind
+            {
+                *auto_width = false;
             }
             if parent.definite[ca]
                 && let Some(ps) = parent.size
@@ -2562,10 +2561,11 @@ fn set_text_content(ed: &mut Editor, a: &Args) -> ToolResult {
         a,
         "updates",
         "Set text",
+        // html wins over textContent: clients with the older schema must still send textContent.
         |u| match (u.get("textContent"), u.get("html")) {
+            (_, Some(Value::String(s))) => Ok(Change::Html(html::parse(s))),
             (Some(Value::String(t)), None) => Ok(Change::Plain(t.clone())),
-            (None, Some(Value::String(s))) => Ok(Change::Html(html::parse(s))),
-            _ => Err("pass exactly one of textContent or html (as a string)".into()),
+            _ => Err("pass textContent or html (as a string)".into()),
         },
         |node| {
             node.kind.text().map(|_| ()).ok_or_else(|| {
