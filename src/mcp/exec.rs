@@ -751,6 +751,14 @@ pub fn glob(pattern: &str, s: &str) -> bool {
     true
 }
 
+fn text_matches(query: &str, value: &str) -> bool {
+    if query.contains('*') {
+        glob(query, value)
+    } else {
+        value.to_lowercase().contains(&query.to_lowercase())
+    }
+}
+
 fn value_matches(want: &str, got: &str) -> Option<String> {
     if glob(want, got) {
         return Some(got.to_string());
@@ -775,7 +783,7 @@ fn find_nodes(ed: &mut Editor, a: &Args) -> ToolResult {
             scope.push((p, ed.page_doc(p).paint_order()));
         }
     }
-    let text_q = a.str("textValue");
+    let text_q = a.str("textValue").or_else(|| a.str("query"));
     let filters: Vec<(String, String)> = a
         .get("filters")
         .and_then(Value::as_array)
@@ -790,7 +798,7 @@ fn find_nodes(ed: &mut Editor, a: &Args) -> ToolResult {
         })
         .unwrap_or_default();
     if text_q.is_none() && filters.is_empty() {
-        return Err("pass textValue and/or filters".into());
+        return Err("pass textValue, query and/or filters".into());
     }
     let mut results = Vec::new();
     for (page, ids) in scope {
@@ -800,7 +808,7 @@ fn find_nodes(ed: &mut Editor, a: &Args) -> ToolResult {
             let mut matched = Vec::new();
             if let Some(q) = text_q {
                 match n.kind.text() {
-                    Some(t) if glob(q, t) => matched.push(json!({"textValue": t})),
+                    Some(t) if text_matches(q, t) => matched.push(json!({"textValue": t})),
                     _ => continue,
                 }
             }

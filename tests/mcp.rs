@@ -349,6 +349,45 @@ fn editing_tools_update_move_duplicate_and_delete() {
 }
 
 #[test]
+fn find_nodes_matches_substrings_and_query_in_absolute_children() {
+    let mut h = host();
+    let artboard = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Invoice", "styles": {"width": 300, "height": 200}}),
+    );
+    let created = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": artboard["id"], "mode": "insert-children",
+        "html": "<div style='position:absolute;left:5px;top:5px'><span>Delivery note GRN-2231: 1 case</span></div>"}),
+    );
+    let root = num(&created["createdNodeIds"][0]);
+    let text_id =
+        h.ed.doc
+            .subtree(root)
+            .into_iter()
+            .find(|id| h.ed.doc.get(*id).unwrap().kind.text().is_some())
+            .unwrap();
+    let text_key = exec::node_key(&h.ed, 0, text_id);
+    for args in [
+        json!({"nodeId": artboard["id"], "textValue": "GRN-2231"}),
+        json!({"nodeId": artboard["id"], "query": "grn-2231"}),
+        json!({"nodeId": artboard["id"], "textValue": "*GRN-2231*"}),
+    ] {
+        let found = call(&mut h, "find_nodes", args);
+        assert_eq!(found["count"], 1, "{found}");
+        assert_eq!(found["results"][0]["id"], text_key);
+    }
+    let anchored = call(
+        &mut h,
+        "find_nodes",
+        json!({"nodeId": artboard["id"], "textValue": "GRN-2231*"}),
+    );
+    assert_eq!(anchored["count"], 0, "wildcard matching stays anchored");
+}
+
+#[test]
 fn set_text_content_validates_whole_batch_before_editing() {
     let mut h = host();
     let artboard = call(

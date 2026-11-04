@@ -214,13 +214,15 @@ pub fn definitions() -> Vec<Value> {
         tool(
             "find_nodes",
             "Find nodes by text content and/or computed style. Searches the whole project by \
-             default; pass pageId for one page or nodeId for a subtree. `textValue` matches text \
-             case-insensitively with * wildcards anchored to the whole value. `filters` are \
-             {styleName, styleValue} pairs (AND), values may use * wildcards; colors match by value.",
+             default; pass pageId for one page or nodeId for a subtree. `textValue` (or `query`) \
+             matches a case-insensitive substring by default; with * wildcards it matches the \
+             entire text. `filters` are {styleName, styleValue} pairs (AND), values may use * \
+             wildcards; colors match by value.",
             json!({
                 "pageId": page_id(),
                 "nodeId": node_id("Optional subtree root; takes priority over pageId."),
                 "textValue": {"type": "string"},
+                "query": {"type": "string", "description": "Alias for textValue; textValue takes priority when both are provided."},
                 "filters": {"type": "array", "items": {"type": "object", "properties": {
                     "styleName": {"type": "string"}, "styleValue": {"type": "string"}}}},
             }),
@@ -229,8 +231,9 @@ pub fn definitions() -> Vec<Value> {
         ),
         tool(
             "get_font_family_info",
-            "Whether font families are available and their weights/styles. Sketch renders text \
-             with Inter (400, 700, normal and italic); other families fall back to Inter.",
+            "Whether font families are available and their weights/styles. Bundled Inter supports \
+             400/500/600/700 (italic 400/700), and Noto Sans Mono supports regular/bold; \
+             other families fall back to Inter.",
             json!({"familyNames": {"type": "array", "items": {"type": "string"}}}),
             &["familyNames"],
             true,
